@@ -20,8 +20,8 @@ afterEvaluate {
                     url.set(repositoryUrl)
                     licenses {
                         license {
-                            name.set("MIT License")
-                            url.set("https://opensource.org/licenses/MIT")
+                            name.set("Tranthor SDK License")
+                            url.set("https://github.com/tranthor-main/sdk-android/blob/main/LICENSE")
                         }
                     }
                     developers {

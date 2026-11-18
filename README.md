@@ -17,8 +17,8 @@ Depend on these coordinates:
 
 ```kotlin
 dependencies {
-    implementation("com.tranthor:tranthor-sdk:0.2.0")
-    implementation("com.tranthor:tranthor-push:0.2.0") // optional
+    implementation("com.tranthor:tranthor-sdk:0.2.1")
+    implementation("com.tranthor:tranthor-push:0.2.1") // optional
 }
 ```
 
@@ -122,4 +122,4 @@ The push token never appears in `onError`: it is replaced by `"<redacted>"`.
 
 ## Contributing and licence
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) to build and test, and [CHANGELOG.md](CHANGELOG.md) for releases. Report security issues as described in [SECURITY.md](SECURITY.md). Licensed under the [MIT License](LICENSE).
+See [CONTRIBUTING.md](CONTRIBUTING.md) to build and test, and [CHANGELOG.md](CHANGELOG.md) for releases. Report security issues as described in [SECURITY.md](SECURITY.md). Use of the SDK is covered by the [Tranthor SDK License](LICENSE): you may include it in your apps to connect them to Tranthor, and may not redistribute it on its own or use it with other services.
