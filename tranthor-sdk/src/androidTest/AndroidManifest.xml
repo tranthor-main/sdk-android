@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Test APK only: cleartext to the loopback mock (adb reverse) or the emulator host alias. -->
+    <application android:networkSecurityConfig="@xml/conformance_network_security">
+        <activity
+            android:name="com.tranthor.sdk.conformance.LifecycleTestActivity"
+            android:exported="false" />
+    </application>
+</manifest>

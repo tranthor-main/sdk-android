@@ -1,0 +1,200 @@
+public final class com/tranthor/push/PushConfiguration {
+	public fun <init> (Ljava/lang/String;)V
+	public fun <init> (Ljava/lang/String;I)V
+	public synthetic fun <init> (Ljava/lang/String;IILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun getApplicationId ()Ljava/lang/String;
+	public final fun getRecentEventLimit ()I
+}
+
+public final class com/tranthor/push/PushContent {
+	public static final field Companion Lcom/tranthor/push/PushContent$Companion;
+	public synthetic fun <init> (Lcom/tranthor/push/PushNotification;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;Lkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public static final fun fromData (Ljava/util/Map;)Lcom/tranthor/push/PushContent;
+	public final fun getBody ()Ljava/lang/String;
+	public final fun getChannelId ()Ljava/lang/String;
+	public final fun getData ()Ljava/util/Map;
+	public final fun getNotification ()Lcom/tranthor/push/PushNotification;
+	public final fun getTitle ()Ljava/lang/String;
+	public final fun getUrl ()Ljava/lang/String;
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class com/tranthor/push/PushContent$Companion {
+	public final fun fromData (Ljava/util/Map;)Lcom/tranthor/push/PushContent;
+}
+
+public abstract class com/tranthor/push/PushException : java/lang/Exception {
+	public synthetic fun <init> (Ljava/lang/String;Lkotlin/jvm/internal/DefaultConstructorMarker;)V
+}
+
+public final class com/tranthor/push/PushException$EmptyDeviceToken : com/tranthor/push/PushException {
+	public fun <init> ()V
+}
+
+public final class com/tranthor/push/PushException$InvalidApplicationId : com/tranthor/push/PushException {
+	public fun <init> ()V
+}
+
+public abstract class com/tranthor/push/PushInteraction {
+	public static final field Companion Lcom/tranthor/push/PushInteraction$Companion;
+	public static final field DEFAULT_ACTION Ljava/lang/String;
+}
+
+public final class com/tranthor/push/PushInteraction$Companion {
+}
+
+public final class com/tranthor/push/PushInteraction$Dismissed : com/tranthor/push/PushInteraction {
+	public static final field INSTANCE Lcom/tranthor/push/PushInteraction$Dismissed;
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class com/tranthor/push/PushInteraction$Foreground : com/tranthor/push/PushInteraction {
+	public static final field INSTANCE Lcom/tranthor/push/PushInteraction$Foreground;
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class com/tranthor/push/PushInteraction$Opened : com/tranthor/push/PushInteraction {
+	public fun <init> ()V
+	public fun <init> (Ljava/lang/String;)V
+	public synthetic fun <init> (Ljava/lang/String;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;)Lcom/tranthor/push/PushInteraction$Opened;
+	public static synthetic fun copy$default (Lcom/tranthor/push/PushInteraction$Opened;Ljava/lang/String;ILjava/lang/Object;)Lcom/tranthor/push/PushInteraction$Opened;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getActionIdentifier ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class com/tranthor/push/PushInteraction$Received : com/tranthor/push/PushInteraction {
+	public static final field INSTANCE Lcom/tranthor/push/PushInteraction$Received;
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class com/tranthor/push/PushNotification {
+	public static final field Companion Lcom/tranthor/push/PushNotification$Companion;
+	public static final field DATA_KEY Ljava/lang/String;
+	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/String;Lkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun equals (Ljava/lang/Object;)Z
+	public static final fun fromData (Ljava/util/Map;)Lcom/tranthor/push/PushNotification;
+	public static final fun fromExtras (Landroid/os/Bundle;)Lcom/tranthor/push/PushNotification;
+	public static final fun fromMarker (Ljava/lang/String;)Lcom/tranthor/push/PushNotification;
+	public final fun getDeliveryId ()Ljava/lang/String;
+	public final fun getImageUrl ()Ljava/lang/String;
+	public fun hashCode ()I
+	public static final fun marker (Ljava/lang/String;)Ljava/lang/String;
+	public static final fun marker (Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class com/tranthor/push/PushNotification$Companion {
+	public final fun fromData (Ljava/util/Map;)Lcom/tranthor/push/PushNotification;
+	public final fun fromExtras (Landroid/os/Bundle;)Lcom/tranthor/push/PushNotification;
+	public final fun fromMarker (Ljava/lang/String;)Lcom/tranthor/push/PushNotification;
+	public final fun marker (Ljava/lang/String;)Ljava/lang/String;
+	public final fun marker (Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;
+	public static synthetic fun marker$default (Lcom/tranthor/push/PushNotification$Companion;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;)Ljava/lang/String;
+}
+
+public final class com/tranthor/push/PushPermission {
+	public static final field INSTANCE Lcom/tranthor/push/PushPermission;
+	public static final field PERMISSION Ljava/lang/String;
+	public static final fun canPostNotifications (Landroid/content/Context;)Z
+	public static final fun request (Landroid/app/Activity;I)V
+	public static final fun requiresRuntimePermission ()Z
+	public static final fun shouldRequest (Landroid/content/Context;)Z
+	public static final fun state (Landroid/content/Context;)Lcom/tranthor/sdk/InstallationPermission;
+}
+
+public final class com/tranthor/push/PushTap {
+	public final fun getData ()Ljava/util/Map;
+	public final fun getInteraction ()Lcom/tranthor/push/PushInteraction;
+	public final fun getNotification ()Lcom/tranthor/push/PushNotification;
+	public final fun getUrl ()Ljava/lang/String;
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class com/tranthor/push/RichImageConfiguration {
+	public fun <init> (Ljava/util/Set;)V
+	public fun <init> (Ljava/util/Set;I)V
+	public fun <init> (Ljava/util/Set;II)V
+	public synthetic fun <init> (Ljava/util/Set;IIILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun accepts (Ljava/lang/String;)Z
+	public final fun getAllowedHosts ()Ljava/util/Set;
+	public final fun getMaximumBytes ()I
+	public final fun getTimeoutMs ()I
+}
+
+public abstract class com/tranthor/push/TranthorMessagingService : com/google/firebase/messaging/FirebaseMessagingService {
+	public fun <init> ()V
+	protected fun notificationStyle ()Lcom/tranthor/push/TranthorNotificationStyle;
+	public final fun onMessageReceived (Lcom/google/firebase/messaging/RemoteMessage;)V
+	public final fun onNewToken (Ljava/lang/String;)V
+	protected fun onOtherMessage (Lcom/google/firebase/messaging/RemoteMessage;)V
+	protected fun onTranthorMessage (Lcom/google/firebase/messaging/RemoteMessage;Lcom/tranthor/push/PushNotification;Z)V
+	protected fun onTranthorToken (Ljava/lang/String;)V
+	protected fun tranthorPush (Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+}
+
+public final class com/tranthor/push/TranthorNotificationStyle {
+	public fun <init> (ILjava/lang/String;Ljava/lang/CharSequence;Landroid/content/Intent;)V
+	public fun <init> (ILjava/lang/String;Ljava/lang/CharSequence;Landroid/content/Intent;Ljava/lang/Class;)V
+	public fun <init> (ILjava/lang/String;Ljava/lang/CharSequence;Landroid/content/Intent;Ljava/lang/Class;Lcom/tranthor/push/RichImageConfiguration;)V
+	public synthetic fun <init> (ILjava/lang/String;Ljava/lang/CharSequence;Landroid/content/Intent;Ljava/lang/Class;Lcom/tranthor/push/RichImageConfiguration;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun getDefaultChannelId ()Ljava/lang/String;
+	public final fun getDefaultChannelName ()Ljava/lang/CharSequence;
+	public final fun getDismissReceiver ()Ljava/lang/Class;
+	public final fun getImages ()Lcom/tranthor/push/RichImageConfiguration;
+	public final fun getLaunchIntent ()Landroid/content/Intent;
+	public final fun getSmallIcon ()I
+}
+
+public final class com/tranthor/push/TranthorNotifications {
+	public static final field ACTION_DISMISS Ljava/lang/String;
+	public static final field ACTION_OPEN Ljava/lang/String;
+	public static final field EXTRA_ACTION Ljava/lang/String;
+	public static final field EXTRA_DATA Ljava/lang/String;
+	public static final field EXTRA_INTERACTION Ljava/lang/String;
+	public static final field EXTRA_NONCE Ljava/lang/String;
+	public static final field EXTRA_URL Ljava/lang/String;
+	public static final field INSTANCE Lcom/tranthor/push/TranthorNotifications;
+	public static final field INTERACTION_DISMISSED Ljava/lang/String;
+	public static final field INTERACTION_OPENED Ljava/lang/String;
+	public static final fun build (Landroid/content/Context;Ljava/lang/String;ILjava/lang/CharSequence;Ljava/lang/CharSequence;Landroid/app/PendingIntent;Landroid/app/PendingIntent;)Landroid/app/Notification;
+	public static final fun build (Landroid/content/Context;Ljava/lang/String;ILjava/lang/CharSequence;Ljava/lang/CharSequence;Landroid/app/PendingIntent;Landroid/app/PendingIntent;Landroid/graphics/Bitmap;)Landroid/app/Notification;
+	public static synthetic fun build$default (Landroid/content/Context;Ljava/lang/String;ILjava/lang/CharSequence;Ljava/lang/CharSequence;Landroid/app/PendingIntent;Landroid/app/PendingIntent;Landroid/graphics/Bitmap;ILjava/lang/Object;)Landroid/app/Notification;
+	public static final fun decode ([B)Landroid/graphics/Bitmap;
+	public static final fun decode ([BI)Landroid/graphics/Bitmap;
+	public static synthetic fun decode$default ([BIILjava/lang/Object;)Landroid/graphics/Bitmap;
+	public static final fun dismissIntent (Landroid/content/Context;Ljava/lang/Class;Lcom/tranthor/push/PushNotification;I)Landroid/app/PendingIntent;
+	public static final fun ensureChannel (Landroid/content/Context;Ljava/lang/String;Ljava/lang/CharSequence;)V
+	public static final fun interactionFrom (Landroid/content/Context;Landroid/content/Intent;)Lkotlin/Pair;
+	public static final fun interactionFrom (Landroid/content/Context;Landroid/content/Intent;Z)Lkotlin/Pair;
+	public static synthetic fun interactionFrom$default (Landroid/content/Context;Landroid/content/Intent;ZILjava/lang/Object;)Lkotlin/Pair;
+	public static final fun loadImage (Lcom/tranthor/push/PushNotification;Lcom/tranthor/push/RichImageConfiguration;)Landroid/graphics/Bitmap;
+	public static final fun openIntent (Landroid/content/Context;Landroid/content/Intent;Lcom/tranthor/push/PushNotification;I)Landroid/app/PendingIntent;
+	public static final fun prepare (Landroid/content/Context;)V
+	public static final fun show (Landroid/content/Context;Lcom/tranthor/push/PushContent;Lcom/tranthor/push/TranthorNotificationStyle;)Z
+	public static final fun tapFrom (Landroid/content/Context;Landroid/content/Intent;)Lcom/tranthor/push/PushTap;
+	public static final fun tapFrom (Landroid/content/Context;Landroid/content/Intent;Z)Lcom/tranthor/push/PushTap;
+	public static synthetic fun tapFrom$default (Landroid/content/Context;Landroid/content/Intent;ZILjava/lang/Object;)Lcom/tranthor/push/PushTap;
+	public static final fun tapIntent (Landroid/content/Context;Landroid/content/Intent;Lcom/tranthor/push/PushContent;)Landroid/content/Intent;
+	public static final fun unverifiedTrayOpenFrom (Landroid/content/Intent;)Lkotlin/Pair;
+}
+
+public final class com/tranthor/push/TranthorPush {
+	public static final field Companion Lcom/tranthor/push/TranthorPush$Companion;
+	public fun <init> (Lcom/tranthor/push/PushConfiguration;Lcom/tranthor/sdk/TranthorSDK;Lkotlin/jvm/functions/Function0;)V
+	public synthetic fun <init> (Lcom/tranthor/push/PushConfiguration;Lcom/tranthor/sdk/TranthorSDK;Lkotlin/jvm/functions/Function0;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public static final fun bind (Landroid/content/Context;Lcom/tranthor/push/PushConfiguration;Lcom/tranthor/sdk/TranthorSDK;)Lcom/tranthor/push/TranthorPush;
+	public final fun getConfiguration ()Lcom/tranthor/push/PushConfiguration;
+	public final fun getHasDeviceToken ()Z
+	public final fun handle (Lcom/tranthor/push/PushNotification;Lcom/tranthor/push/PushInteraction;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+	public final fun refreshPermission (Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+	public final fun registerDeviceToken (Ljava/lang/String;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+}
+
+public final class com/tranthor/push/TranthorPush$Companion {
+	public final fun bind (Landroid/content/Context;Lcom/tranthor/push/PushConfiguration;Lcom/tranthor/sdk/TranthorSDK;)Lcom/tranthor/push/TranthorPush;
+}
+

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Debug only: adb-driven simulated push (bypasses FCM). DUMP restricts senders to shell/system. -->
+        <receiver
+            android:name=".debug.SimulatedPushReceiver"
+            android:exported="true"
+            android:permission="android.permission.DUMP" />
+    </application>
+</manifest>
