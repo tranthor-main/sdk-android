@@ -84,7 +84,9 @@ class LifecycleHookTest {
             assertTrue("Failed background delivery must pause with the batch retained", waitFor(1500) { sdk.deliveryPaused() })
             assertEquals("ON_STOP must cancel the backoff and make one immediate attempt", 2, transport.attempts.get())
             hooks.second.dispose(); sdk.shutdown()
-            assertEquals(listOf("home"), JsonStore(root, "default", AtomicFileIo).load().queued.map { it.value["event"]?.stringValue })
+            val queue = File(JsonStore(root, "default", AtomicFileIo).directory, "queue")
+            val kept = queue.list()!!.filter { it.endsWith(".json") }.sorted().map { JsonValue.parse(File(queue, it).readText())["event"]?.stringValue }
+            assertEquals(listOf("home"), kept)
         } finally { root.deleteRecursively() }
     }
 

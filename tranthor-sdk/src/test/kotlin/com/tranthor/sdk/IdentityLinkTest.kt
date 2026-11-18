@@ -13,7 +13,7 @@ class IdentityLinkTest {
     private fun config(root: java.io.File) = Configuration("fixture", host = "http://127.0.0.1:1", batchSize = 100,
         flushIntervalMs = 60000, storageNamespace = "identity-link", storageDirectory = root)
 
-    private fun queued(root: java.io.File) = loadState(root, "identity-link").queued.map { it.value }
+    private fun queued(root: java.io.File) = savedEvents(root, "identity-link")
 
     @Test fun firstIdentifyAfterAnonymousUseCarriesTheStoredAnonymousId() = runBlocking {
         val root = tempRoot("tranthor-link")

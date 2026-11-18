@@ -71,6 +71,52 @@ public class TranthorSDK private constructor(
     private var removalParked: DeliveryFailure? = null
     /** Counts triggers, so one that arrives while a cycle runs still gets a cycle of its own after it. */
     private var removalTriggers = 0L
+    private val exhaustionPause = ExhaustionPause(scope, sleep)
+
+    /**
+     * The wait after an attempt cycle ended with the head batch kept after a retryable failure: 30 s, doubling
+     * with each consecutive such cycle up to 5 min, on the injected sleep. The count and the running pause live
+     * together, so ending the pause and resetting the count cannot be done half.
+     */
+    private class ExhaustionPause(private val scope: CoroutineScope, private val sleep: suspend (Double) -> Unit) {
+        private var exhaustedCycles = 0
+        private var job: Job? = null
+        private var generation = 0L
+
+        val isRunning: Boolean get() = job != null
+
+        /** Starts the pause for the next consecutive exhausted cycle; [onElapsed] runs when it ends by itself. */
+        fun start(onElapsed: () -> Unit) {
+            val milliseconds = minOf(MAX_PAUSE_MS, BASE_PAUSE_MS shl exhaustedCycles)
+            exhaustedCycles = minOf(exhaustedCycles + 1, MAX_DOUBLINGS)
+            val mine = ++generation
+            job = scope.launch {
+                try { sleep(milliseconds.toDouble()) } catch (_: CancellationException) { return@launch }
+                if (mine != generation) return@launch
+                job = null
+                onElapsed()
+            }
+        }
+
+        /** Ends the running pause, if any, and keeps the count: an attempt that follows may exhaust again. */
+        fun end() {
+            generation++
+            job?.cancel(); job = null
+        }
+
+        /** Ends the running pause, if any, and starts counting again from 30 s. */
+        fun reset() {
+            end()
+            exhaustedCycles = 0
+        }
+
+        private companion object {
+            const val BASE_PAUSE_MS = 30_000
+            const val MAX_PAUSE_MS = 300_000
+            /** 30 s doubled this many times is past the maximum. */
+            const val MAX_DOUBLINGS = 4
+        }
+    }
 
     private class Snapshot(val anonymousId: String, val userId: String?, val optedOut: Boolean)
     @Volatile private var snapshot = Snapshot(state.anonymousId, state.userId, state.optedOut)
@@ -125,7 +171,7 @@ public class TranthorSDK private constructor(
             installationRegistration(state, this@TranthorSDK.context, platform, nextInstallationTime(), installation)
         } else null
         try {
-            admit(listOfNotNull(data, registration))
+            admit(listOfNotNull(data, registration), saveState = state.userId != previousUserId || state.anonymousId != previousAnonymousId)
             if (registration != null) sentInstallation = fingerprint
         } catch (error: Throwable) {
             state.userId = previousUserId
@@ -211,8 +257,11 @@ public class TranthorSDK private constructor(
         admit(listOf(payload))
     }
 
-    /** Admits typed payloads with one durable state write: all of them, or none. */
-    private fun admit(payloads: List<LinkedHashMap<String, JsonValue>>) {
+    /**
+     * Admits typed payloads as event files: all of them, or none. With [saveState] the state file is written
+     * after them, so a crash in between loses a stored identity change but never an event the server was told of.
+     */
+    private fun admit(payloads: List<LinkedHashMap<String, JsonValue>>, saveState: Boolean = false) {
         if (state.optedOut || stopped) return
         val items = payloads.map { payload ->
             // Map.putIfAbsent is API 24; minSdk is 23.
@@ -230,20 +279,22 @@ public class TranthorSDK private constructor(
                 throw TranthorException.InvalidPayload("Invalid JSON payload: ${error.message}")
             }
         }
-        val waitingCapacity = maxOf(0, configuration.maxQueueSize - state.active.size)
-        // Overflow can drop from the middle of the queue, so a failed save restores a snapshot.
-        val before = if (state.queued.size + items.size > waitingCapacity) ArrayList(state.queued) else null
-        items.forEach { state.queued.addLast(it) }
-        val removed = trimQueue(state.queued, waitingCapacity)
         try {
-            store.save(state)
+            store.queue.append(items)
         } catch (error: Exception) {
-            if (before != null) { state.queued.clear(); state.queued.addAll(before) }
-            else for (item in items.asReversed()) if (state.queued.lastOrNull() === item) state.queued.removeLast()
             throw storeError(error)
         }
+        if (saveState) {
+            try {
+                store.save(state)
+            } catch (error: Exception) {
+                store.queue.rollback(items)
+                throw storeError(error)
+            }
+        }
+        val removed = store.queue.trim(maxOf(0, configuration.maxQueueSize - store.queue.activeCount))
         reportDropped(removed.map { it.value })
-        if (state.queued.size >= configuration.batchSize) beginCycle() else armTimer()
+        if (store.queue.queuedCount >= configuration.batchSize) beginCycle() else armTimer()
     }
 
     /**
@@ -276,7 +327,7 @@ public class TranthorSDK private constructor(
             events.add(installationRegistration(state, context, platform, nextInstallationTime(), registered))
             state.installation = registered
             try {
-                admit(events)
+                admit(events, saveState = true)
             } catch (error: Throwable) {
                 state.installation = previous
                 throw error
@@ -302,13 +353,23 @@ public class TranthorSDK private constructor(
         val installation = state.installation?.takeIf { !state.optedOut && state.userId != null }
         // Built before the rotation, so it carries the outgoing identity.
         val removal = installation?.let { installationRemoval(state, context, nextInstallationTime(), it) }
+        val previousUserId = state.userId
+        val previousAnonymousId = state.anonymousId
+        val previousSentInstallation = sentInstallation
         state.userId = null
         state.anonymousId = newAnonymousId()
         sentInstallation = null
+        try {
+            // The token stays held: the next identify() registers it to that customer. Nothing is registered now.
+            if (removal == null) saveOrThrow() else admit(listOf(removal), saveState = true)
+        } catch (error: Throwable) {
+            // All or nothing: a failed write leaves the identity as it was, in memory and on disk.
+            state.userId = previousUserId
+            state.anonymousId = previousAnonymousId
+            sentInstallation = previousSentInstallation
+            throw error
+        }
         publish()
-        // The token stays held: the next identify() registers it to that customer. Nothing is registered now.
-        if (removal == null) { saveOrThrow(); return@withContext }
-        admit(listOf(removal))
     }
 
     /**
@@ -326,16 +387,20 @@ public class TranthorSDK private constructor(
             if (!state.optedOut) state.pendingRemovals = optOutRemovals(state, state.installation?.takeIf { state.userId != null }, ::nextInstallationTime)
             state.optedOut = true
             sentInstallation = null
-            state.queued.clear()
-            state.active = emptyList()
+            store.queue.dropFromMemory()
             dropped.clear()
             dropNotification?.cancel(); dropNotification = null
             cancelTimer()
+            // The discarded batch was the reason for the pause; later events start fresh.
+            exhaustionPause.reset()
             val pending = cycle
             pending?.cancel(); backoff?.cancel()
             publish()
             // Consent must be durable before any queue/identity state can reopen it.
+            // The files go last: a restart that finds consent but surviving files finishes the deletion.
+            // A file that cannot be deleted stays and is deleted by the next start or by optIn(), never sent.
             val saved = runCatching { store.saveConsent(true); store.save(state) }
+            if (saved.isSuccess) store.queue.deleteAllFiles()
             pending to saved
         } ?: return
         outcome.first?.join()
@@ -345,11 +410,13 @@ public class TranthorSDK private constructor(
 
     /** Whether the delivery cycle has anything to send: opt-out removals always, the queue only while opted in. */
     private fun hasDeliverableWork(): Boolean =
-        if (state.pendingRemovals.isNotEmpty()) removalParked == null else !state.optedOut && state.queued.isNotEmpty()
+        if (state.pendingRemovals.isNotEmpty()) removalParked == null else !state.optedOut && store.queue.hasQueued
 
     /** Persists opt-in and resumes collection. */
     public suspend fun optIn(): Unit = withContext(dispatcher) {
         if (stopped) return@withContext
+        // Events that outlived a failed deletion at opt-out must never be sent: they go before collection resumes.
+        if (state.optedOut) store.queue.deleteAllFiles()?.let { throw storeError(it) }
         try { store.saveConsent(false) } catch (error: Exception) { throw storeError(error) }
         state.optedOut = false
         publish()
@@ -377,8 +444,9 @@ public class TranthorSDK private constructor(
     }
 
     /**
-     * Awaits the current cycle and queued batches. Throws [DeliveryFailure] for a terminal batch
-     * failure after the call began, [TranthorException.FlushCancelled] when the cycle was cancelled,
+     * Awaits the current cycle and queued batches, and attempts at once even while delivery is paused. Throws
+     * [DeliveryFailure] for a batch that failed after the call began (a batch whose retries ran out stays queued
+     * for a later attempt), [TranthorException.FlushCancelled] when the cycle was cancelled,
      * and [TranthorException.Stopped] after [shutdown].
      */
     public suspend fun flush() {
@@ -434,7 +502,7 @@ public class TranthorSDK private constructor(
     }
 
     private fun armTimer() {
-        if (timer != null || cycle != null || !hasDeliverableWork() || stopped || paused) return
+        if (timer != null || cycle != null || !hasDeliverableWork() || stopped || paused || exhaustionPause.isRunning) return
         timerGeneration++
         val generation = timerGeneration
         val delayMs = configuration.flushIntervalMs.toDouble()
@@ -451,10 +519,16 @@ public class TranthorSDK private constructor(
     }
 
     private fun beginCycle() {
-        if (cycle != null || stopped || paused || !hasDeliverableWork()) return
+        if (cycle != null || stopped || paused || exhaustionPause.isRunning || !hasDeliverableWork()) return
         cancelTimer()
         // ATOMIC: a cycle cancelled before it starts still runs its cleanup and settles its waiters.
         cycle = scope.launch(start = CoroutineStart.ATOMIC) { runCycle(this) }
+    }
+
+    /** An explicit flush or a return from the background attempts at once instead of waiting the pause out. */
+    private fun attemptAtOnce() {
+        exhaustionPause.end()
+        beginCycle()
     }
 
     private fun persistDeliveryState() {
@@ -584,24 +658,23 @@ public class TranthorSDK private constructor(
 
     private suspend fun runCycle(cycleScope: CoroutineScope) {
         val job = currentCoroutineContext().job
+        var exhausted = false
         try {
             if (!deliverRemovals(cycleScope, job)) return
-            while (state.queued.isNotEmpty() && !job.isCancelled && !stopped && !state.optedOut) {
-                val count = minOf(configuration.batchSize, state.queued.size)
-                state.active = List(count) { state.queued.removeFirst() }
-                persistDeliveryState()
-                val batch = state.active
+            store.queue.retryPendingDeletions()
+            while (store.queue.hasQueued && !job.isCancelled && !stopped && !state.optedOut) {
+                val batch = store.queue.takeBatch(configuration.batchSize)
                 val outcome = sendWithRetries(cycleScope, job, batch, interruptedByOptOut = true)
                 val acknowledged = outcome.acknowledged
                 val terminal = outcome.terminal
                 if (terminal != null) {
-                    notify(BatchFailure(terminal, batch.map { it.value }, outcome.attempts))
+                    // A retryable failure keeps the batch: the host hears only of events that are gone for good.
+                    if (!terminal.retryable) notify(BatchFailure(terminal, batch.map { it.value }, outcome.attempts))
+                    else exhausted = true
                     failWaiters(terminal)
                 }
-                if (acknowledged || terminal != null) {
-                    state.active = emptyList()
-                    persistDeliveryState()
-                }
+                if (acknowledged) exhaustionPause.reset()
+                if (acknowledged || terminal?.retryable == false) store.queue.completeBatch()
                 // Never advance to another batch while this one remains unacknowledged.
                 if (!acknowledged && terminal == null) break
                 if (job.isCancelled || stopped || state.optedOut || paused) break
@@ -610,14 +683,11 @@ public class TranthorSDK private constructor(
         } finally {
             // The sole recovery point for an unacknowledged batch. Cancellation is cycle-local and
             // cannot be undone by a foreground event or a flush await.
-            val cancelled = job.isCancelled || stopped || paused || state.active.isNotEmpty()
-            if (state.active.isNotEmpty() && !state.optedOut) {
-                for (index in state.active.indices.reversed()) state.queued.addFirst(state.active[index])
-                state.active = emptyList()
-                persistDeliveryState()
-            }
+            val cancelled = job.isCancelled || stopped || paused || store.queue.hasActive
+            if (store.queue.hasActive && !state.optedOut) store.queue.returnBatchToHead()
             backoff = null
             cycle = null
+            if (exhausted) exhaustionPause.start { beginCycle() }
             val completions = ArrayList(waiters); waiters.clear()
             for (waiter in completions) {
                 val failure = waiter.failure
@@ -654,7 +724,10 @@ public class TranthorSDK private constructor(
                     // pause without a stop is not a return, and the first one of the process belongs to the app
                     // start, which already made its cycle (configured before the first activity, or replayed inside
                     // configure()).
-                    if (previous == LifecycleEvent.STOP) triggerRemovals()
+                    if (previous == LifecycleEvent.STOP) {
+                        triggerRemovals()
+                        if (exhaustionPause.isRunning) attemptAtOnce()
+                    }
                     armTimer()
                     null
                 }
@@ -690,10 +763,11 @@ public class TranthorSDK private constructor(
         if (state.optedOut) return@withContext null
         emitDropped()
         paused = false
-        if (cycle == null && state.queued.isEmpty()) return@withContext null
+        store.queue.retryPendingDeletions()
+        if (cycle == null && !store.queue.hasQueued) return@withContext null
         // flush() is not a trigger: the queue waits behind a parked opt-out removal, so report its failure.
         removalParked?.let { failure -> if (cycle == null) return@withContext CompletableDeferred<Unit>().apply { completeExceptionally(failure) } }
-        Waiter(CompletableDeferred()).also { waiters.add(it); beginCycle() }.deferred
+        Waiter(CompletableDeferred()).also { waiters.add(it); attemptAtOnce() }.deferred
     }
 
     internal fun logDebug(message: String) = platform.logDebug(message)
@@ -724,6 +798,7 @@ public class TranthorSDK private constructor(
             storeWrite: ((ByteArray, java.io.File) -> Unit)? = null,
             storeMove: ((java.io.File, java.io.File) -> Unit)? = null,
             storeRead: ((java.io.File) -> ByteArray?)? = null,
+            storeDelete: ((java.io.File) -> Unit)? = null,
             totalRequestTimeoutMs: Long = 60_000,
         ): TranthorSDK {
             val endpoint = endpointFor(configuration.host)
@@ -736,19 +811,17 @@ public class TranthorSDK private constructor(
                     val store = JsonStore(base, configuration.storageNamespace, io,
                         writeBytes = storeWrite ?: { bytes, file -> io.write(file, bytes) },
                         readBytes = storeRead ?: { io.read(it) },
-                        moveFile = storeMove ?: { from, to -> io.move(from, to) })
+                        moveFile = storeMove ?: { from, to -> io.move(from, to) },
+                        deleteFile = storeDelete ?: { io.delete(it) })
                     val restored = store.load()
-                    val combined = ArrayDeque<QueueItem>(restored.active.size + restored.queued.size)
-                    combined.addAll(restored.active); combined.addAll(restored.queued)
-                    restored.queued = combined
-                    restored.active = emptyList()
-                    if (restored.optedOut) restored.queued.clear()
+                    // An opted-out user's files are deleted; any that remain are deleted again by the next start or by optIn().
+                    if (restored.optedOut) store.queue.deleteAllFiles() else store.queue.load(store.legacyEvents)
                     // Before the first save below, which would hide that the opt-out was interrupted.
                     if (store.interruptedOptOut) restored.installation?.takeIf { restored.userId != null }?.let {
                         restored.pendingRemovals.add(optOutRemoval(restored, it, timestamp(platform.currentTimeMs())))
                     }
                     val removed = ArrayList<Map<String, JsonValue>>()
-                    trimQueue(restored.queued, configuration.maxQueueSize).mapTo(removed) { it.value }
+                    store.queue.trim(configuration.maxQueueSize).mapTo(removed) { it.value }
                     // Persist fail-closed consent recovery independently of routine state writes.
                     store.saveConsent(restored.optedOut)
                     store.save(restored)

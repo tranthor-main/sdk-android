@@ -89,6 +89,27 @@ class RunnerValidationTest {
         Declaration("test", listOf("core", "identity-link"), "1", null, emptyList()).validate(listOf(linked), "1")
     }
 
+    @Test fun durableQueueCapabilityIsAccepted() {
+        val scenario = j(fixture("scenarios/durable-exhausted-batch-retained.json"))
+        Schema(j(fixture("scenario.schema.json"))).validate(scenario)
+        Declaration("test", listOf("core", "durable-queue"), "1", null, emptyList()).validate(listOf(scenario), "1")
+    }
+
+    @Test fun scenarioReplacedByADeclaredCapabilityIsSkippedWithTheReason() {
+        val replaced = j(fixture("scenarios/retries-exhausted.json"))
+        assertEquals("superseded by durable-queue", skipReason(replaced, listOf("core", "transport", "durable-queue")))
+        assertNull(skipReason(replaced, listOf("core", "transport")))
+        val needsLifecycle = j("""{"id":"case","capabilities":["core","lifecycle"],"unless":["durable-queue"],"steps":[]}""")
+        assertEquals("Missing: lifecycle", skipReason(needsLifecycle, listOf("core", "durable-queue")))
+    }
+
+    @Test fun knownFailureForAScenarioSkippedByUnlessFailsLoading() {
+        val replaced = j(fixture("scenarios/retries-exhausted.json"))
+        val declaration = Declaration("test", listOf("core", "transport", "durable-queue"), "1", null, listOf(KnownFailure("retries-exhausted", "r", "issue-1")))
+        assertThrows(CheckFailure::class.java) { declaration.validate(listOf(replaced), "1") }
+        Declaration("test", listOf("core", "transport"), "1", null, listOf(KnownFailure("retries-exhausted", "r", "issue-1"))).validate(listOf(replaced), "1")
+    }
+
     @Test fun subsetChecksNestedObjectsButArraysExactly() {
         subset(j("""{"a":{"b":1}}"""), j("""{"a":{"b":1,"c":2}}"""), "item")
         assertThrows(CheckFailure::class.java) { subset(j("[1]"), j("[1,2]"), "array") }

@@ -27,10 +27,9 @@ class PersistenceTest {
             assertTrue(restored.optedOut)
             assertEquals(anonymous, restored.anonymousId)
             assertEquals("u1", restored.userId)
-            assertEquals(1, restored.queued.size)
-            assertEquals("stable-id", restored.queued.first().value["messageId"]?.stringValue)
-            assertEquals("stable-time", restored.queued.first().value["timestamp"]?.stringValue)
-            assertTrue(restored.active.isEmpty())
+            assertEquals(1, store.legacyEvents.size)
+            assertEquals("stable-id", store.legacyEvents.first().value["messageId"]?.stringValue)
+            assertEquals("stable-time", store.legacyEvents.first().value["timestamp"]?.stringValue)
             assertFalse(store.corruptFile.exists())
         } finally { root.deleteRecursively() }
     }
@@ -45,10 +44,10 @@ class PersistenceTest {
             val restored = store.load()
             assertEquals(anonymous, restored.anonymousId)
             assertNull(restored.userId)
-            assertTrue(restored.queued.isEmpty()); assertTrue(restored.active.isEmpty())
+            assertTrue(store.legacyEvents.isEmpty())
             assertFalse(restored.optedOut)
             store.save(restored)
-            assertEquals(1.0, JsonValue.parse(store.stateFile.readText())["version"]?.numberValue)
+            assertEquals(2.0, JsonValue.parse(store.stateFile.readText())["version"]?.numberValue)
         } finally { root.deleteRecursively() }
     }
 
@@ -83,7 +82,7 @@ class PersistenceTest {
             assertFalse(restored.optedOut)
             assertEquals(anonymous, restored.anonymousId)
             assertEquals("salvaged-user", restored.userId)
-            assertTrue(restored.queued.isEmpty())
+            assertTrue(store.legacyEvents.isEmpty())
             assertTrue(original.contentEquals(store.corruptFile.readBytes()))
         } finally { root.deleteRecursively() }
     }
@@ -262,7 +261,7 @@ class StoreAvailabilityTest {
             val recovered = configureJvm(configuration(root), NoopTransport)
             assertFalse(recovered.isOptedOut); assertEquals(anonymous, recovered.anonymousId); assertEquals("u1", recovered.userId)
             recovered.shutdown()
-            assertEquals(listOf("a", "b", "c"), events(store.load()))
+            assertEquals(listOf("a", "b", "c"), savedEventNames(root))
         } finally { root.deleteRecursively() }
     }
 
@@ -285,7 +284,7 @@ class StoreAvailabilityTest {
             val recovered = configureJvm(configuration(root), NoopTransport)
             assertFalse(recovered.isOptedOut); assertEquals(anonymous, recovered.anonymousId); assertEquals("u1", recovered.userId)
             recovered.shutdown()
-            assertEquals(listOf("a"), events(store.load()))
+            assertEquals(listOf("a"), savedEventNames(root))
         } finally { root.deleteRecursively() }
     }
 
@@ -396,7 +395,7 @@ class StoreAvailabilityTest {
                 val store = JsonStore(root, "default")
                 store.save(StoredState()); store.saveConsent(false)
                 val file = File(store.directory, filename)
-                file.writeText(file.readText().replace("\"version\":1", "\"version\":2"))
+                file.writeText(file.readText().replace(Regex("\"version\":\\d+"), "\"version\":3"))
                 val sdk = configureJvm(configuration(root), NoopTransport)
                 assertTrue(sdk.isOptedOut)
                 sdk.optIn(); sdk.shutdown()
@@ -416,34 +415,6 @@ class StoreAvailabilityTest {
             sdk.shutdown()
             assertEquals("Single-writer saves must not re-read state", 1, reads.count { it.name == "state.json" })
             assertEquals(1, reads.count { it.name == "consent.json" })
-        } finally { root.deleteRecursively() }
-    }
-
-    @Test fun admissionAtTenThousandEventsBenchmark() = runBlocking {
-        val root = root()
-        try {
-            val store = JsonStore(root, "default")
-            val state = StoredState()
-            val item = QueueItem.of(jsonObjectOf("type" to "track", "event" to "Opened", "messageId" to UUID.randomUUID().toString(),
-                "timestamp" to "2026-10-13T00:00:00.000Z", "anonymousId" to UUID.randomUUID().toString(), "properties" to mapOf("source" to "app", "n" to 1)))
-            state.queued = ArrayDeque(List(10_000) { item })
-            store.save(state); store.saveConsent(false)
-            // Calibrate encoding + atomic writing on this machine; a re-read/re-decode adds several times that cost.
-            val reference = File(store.directory, "benchmark.json")
-            val encodeWrite = List(10) {
-                val start = System.nanoTime(); TempRenameFileIo.write(reference, state.encode()); (System.nanoTime() - start) / 1e6
-            }
-            val start = System.nanoTime()
-            val sdk = configureJvm(configuration(root), NoopTransport)
-            val initMs = (System.nanoTime() - start) / 1e6
-            val durations = List(10) { index ->
-                val begin = System.nanoTime(); sdk.track("e$index"); (System.nanoTime() - begin) / 1e6
-            }
-            sdk.shutdown()
-            val referenceMedian = encodeWrite.sorted()[5]; val trackMedian = durations.sorted()[5]
-            println("P6 init_ms=$initMs track_ms=$durations median_ms=$trackMedian encode_write_median_ms=$referenceMedian ratio=${trackMedian / referenceMedian}")
-            assertTrue("Admission must not re-read and decode the full persisted queue", trackMedian < referenceMedian * 3 + 5)
-            assertEquals("Queue stays capped at maxQueueSize", 10_000, store.load().queued.size)
         } finally { root.deleteRecursively() }
     }
 }

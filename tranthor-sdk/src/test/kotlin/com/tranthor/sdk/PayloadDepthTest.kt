@@ -28,7 +28,7 @@ class PayloadDepthTest {
             sdk.track("after")
             sdk.shutdown()
             val again = configureJvm(config, NoopTransport)
-            val queued = events(JsonStore(root, "default").let { it.load() })
+            val queued = savedEventNames(root)
             again.shutdown()
             if (admitted) {
                 assertFalse(again.isOptedOut)
@@ -51,7 +51,7 @@ class PayloadDepthTest {
             val failures = log.snapshot()
             assertEquals(1, failures.size); assertEquals(0, failures[0].attempts); assertEquals(null, failures[0].error.status)
             sdk.shutdown()
-            assertEquals(listOf("ok"), events(JsonStore(root, "default").load()))
+            assertEquals(listOf("ok"), savedEventNames(root))
         } finally { root.deleteRecursively() }
     }
 

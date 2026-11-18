@@ -12,7 +12,7 @@ class InstallationTest {
     private fun config(root: File) = Configuration("fixture", host = "http://127.0.0.1:1", batchSize = 100,
         flushIntervalMs = 60000, storageNamespace = namespace, storageDirectory = root)
 
-    private fun queued(root: File) = loadState(root, namespace).queued.map { it.value }
+    private fun queued(root: File) = savedEvents(root, namespace)
     private fun Map<String, JsonValue>.event() = this["event"]?.stringValue
     private fun Map<String, JsonValue>.property(name: String) = this["properties"]?.objectValue?.get(name)?.stringValue
     private fun installationEvents(root: File) = queued(root).filter { it.event()?.startsWith("Installation ") == true }

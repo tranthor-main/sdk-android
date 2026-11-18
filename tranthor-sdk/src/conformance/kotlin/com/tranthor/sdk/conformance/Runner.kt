@@ -70,10 +70,10 @@ internal class ConformanceSuite(private val environment: ConformanceEnvironment,
         for (scenario in scenarios) {
             val id = scenario["id"]?.stringValue ?: ""
             if (filter != null && filter != id) continue // Diagnostic mode still validates all files.
-            val missing = (scenario["capabilities"]?.arrayValue ?: emptyList()).mapNotNull { it.stringValue }.filter { it !in environment.capabilities }
-            if (missing.isNotEmpty()) {
+            val skip = skipReason(scenario, environment.capabilities)
+            if (skip != null) {
                 skipped++
-                environment.emit(obj("id" to str(id), "result" to str("skip"), "reason" to str("Missing: " + missing.joinToString(","))).toJson())
+                environment.emit(obj("id" to str(id), "result" to str("skip"), "reason" to str(skip)).toJson())
                 continue
             }
             val known = knownFailures.firstOrNull { it.id == id }

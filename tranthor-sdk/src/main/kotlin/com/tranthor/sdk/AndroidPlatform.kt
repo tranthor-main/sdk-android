@@ -133,6 +133,11 @@ internal object AtomicFileIo : FileIo {
         File(from.path + ".bak").delete()
         File(from.path + ".new").delete()
     }
+    override fun delete(file: File) {
+        File(file.path + ".bak").delete()
+        File(file.path + ".new").delete()
+        if (file.exists() && !file.delete()) throw IOException("Unable to delete ${file.name}")
+    }
 }
 
 /**

@@ -157,7 +157,7 @@ internal class Declaration(
     val knownFailures: List<KnownFailure>,
 ) {
     fun validate(scenarios: List<J>, version: String) {
-        val allowed = setOf("core", "transport", "persistence", "lifecycle", "consent", "identity-link")
+        val allowed = setOf("core", "transport", "persistence", "lifecycle", "consent", "identity-link", "durable-queue")
         require(name.isNotEmpty() && suiteVersion == version && version.isNotEmpty(), "Invalid declaration name/version")
         require(allowed.containsAll(capabilities) && capabilities.toSet().size == capabilities.size, "Invalid capabilities")
         lifecycleSource?.let { require(it == "os-hook" || it == "public-method", "Invalid lifecycle source") }
@@ -166,7 +166,7 @@ internal class Declaration(
         for (failure in knownFailures) {
             require(ids.add(failure.id) && failure.reason.isNotEmpty() && failure.tracking.isNotEmpty(), "Invalid known failure")
             val scenario = scenarios.firstOrNull { it["id"]?.stringValue == failure.id } ?: throw CheckFailure("Unknown known failure")
-            require((scenario["capabilities"]?.arrayValue ?: emptyList()).mapNotNull { it.stringValue }.all(capabilities::contains), "Known failure would be skipped")
+            require(skipReason(scenario, capabilities) == null, "Known failure would be skipped")
         }
     }
 }
@@ -219,4 +219,12 @@ internal fun parseTimestamp(text: String): Long? {
     val doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
     val days = era * 146_097 + doe - 719_468
     return ((days * 86_400 + h.toLong() * 3600 + mi.toLong() * 60 + s.toLong()) * 1000) + ms.toLong()
+}
+
+/** Why a scenario does not run against an adapter declaring [capabilities], or null when it runs. */
+internal fun skipReason(scenario: J, capabilities: List<String>): String? {
+    val missing = (scenario["capabilities"]?.arrayValue ?: emptyList()).mapNotNull { it.stringValue }.filter { it !in capabilities }
+    if (missing.isNotEmpty()) return "Missing: " + missing.joinToString(",")
+    val replacedBy = (scenario["unless"]?.arrayValue ?: emptyList()).mapNotNull { it.stringValue }.firstOrNull { it in capabilities }
+    return replacedBy?.let { "superseded by $it" }
 }

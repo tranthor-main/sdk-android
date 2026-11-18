@@ -54,9 +54,7 @@ class DeliveryQueueTest {
             shutdown.await()
             val first = flush.await().exceptionOrNull()
             assertTrue("Cancelled cycle must reject its waiter with FlushCancelled, got $first", first is TranthorException.FlushCancelled)
-            val saved = loadState(root)
-            assertEquals("The unacknowledged batch must return to the queue", listOf("a"), events(saved))
-            assertTrue(saved.active.isEmpty())
+            assertEquals("The unacknowledged batch must stay in the queue", listOf("a"), savedEventNames(root))
             val next = sdk(root, transport, sleeper)
             next.track("b")
             val recovery = async(Dispatchers.Default) { next.flush() }
@@ -86,7 +84,7 @@ class DeliveryQueueTest {
             sdk.track("b")
             withTimeout(5000) { sdk.flush() }
             assertEquals(listOf("a", "b"), transport.snapshot().flatten().map { it["event"]?.stringValue })
-            assertTrue(events(loadState(root)).isEmpty())
+            assertTrue(savedEvents(root).isEmpty())
             sdk.shutdown(); sleeper.releaseAll()
         } finally { root.deleteRecursively() }
     }
@@ -108,7 +106,7 @@ class DeliveryQueueTest {
             shutdown.await()
             assertTrue(first.await().exceptionOrNull() is TranthorException.FlushCancelled)
             assertTrue("Waiter attached to a cancelled cycle must reject", second.await().exceptionOrNull() is TranthorException.FlushCancelled)
-            assertEquals(listOf("a"), events(loadState(root)))
+            assertEquals(listOf("a"), savedEventNames(root))
             sleeper.releaseAll()
         } finally { root.deleteRecursively() }
     }
@@ -123,9 +121,7 @@ class DeliveryQueueTest {
             transport.wait(1)
             // The request is blocked in the transport; admission must not wait for it.
             withTimeout(2000) { sdk.track("second") }
-            val during = loadState(root)
-            assertEquals(listOf("first"), during.active.map { it.value["event"]?.stringValue })
-            assertEquals(listOf("second"), events(during))
+            assertEquals("The batch in flight keeps its file until it is acknowledged", listOf("first", "second"), savedEventNames(root))
             // The cycle drains every queued batch; let the second batch succeed too.
             transport.autoSucceedFutureRequests()
             transport.complete(0)
@@ -148,9 +144,7 @@ class DeliveryQueueTest {
             transport.complete(0)
             shutdown.await()
             assertTrue("Cancelled cycle waiter must reject", flush.await().exceptionOrNull() is TranthorException.FlushCancelled)
-            val saved = loadState(root)
-            assertTrue("A 2xx racing cancellation must still acknowledge the batch", saved.queued.isEmpty())
-            assertTrue(saved.active.isEmpty())
+            assertTrue("A 2xx racing cancellation must still acknowledge the batch", savedEvents(root).isEmpty())
             sleeper.releaseAll()
         } finally { root.deleteRecursively() }
     }
@@ -173,8 +167,7 @@ class DeliveryQueueTest {
             background.await()
             assertTrue("Background retry pause must reject flush", flush.await().isFailure)
             assertEquals(2, transport.count())
-            val saved = loadState(root)
-            assertEquals(1, saved.queued.size); assertTrue(saved.active.isEmpty())
+            assertEquals(1, savedEvents(root).size)
             assertTrue(sdk.deliveryPaused())
             sdk.shutdown(); sleeper.releaseAll()
         } finally { root.deleteRecursively() }
@@ -204,7 +197,7 @@ class DeliveryQueueTest {
             transport.wait(2)
             waitUntil { !sdk.deliveryCycleActive() }
             assertEquals(listOf("offline", "while-paused"), transport.snapshot()[1].map { it["event"]?.stringValue })
-            assertTrue(loadState(root).queued.isEmpty())
+            assertTrue(savedEvents(root).isEmpty())
             sdk.shutdown(); sleeper.releaseAll()
         } finally { root.deleteRecursively() }
     }
@@ -228,9 +221,7 @@ class DeliveryQueueTest {
             background.await()
             assertTrue("Unacknowledged cancelled sleeper must reject flush", flush.await().isFailure)
             assertEquals("An unacknowledged batch cannot advance to the later batch", 1, transport.count())
-            val saved = loadState(root)
-            assertEquals(listOf("a", "b"), events(saved))
-            assertTrue(saved.active.isEmpty())
+            assertEquals(listOf("a", "b"), savedEventNames(root))
             sdk.shutdown(); sleeper.releaseAll()
         } finally { root.deleteRecursively() }
     }
@@ -253,7 +244,7 @@ class DeliveryQueueTest {
             stale?.join()
             assertFalse("A stale timer must not create a delivery cycle", sdk.deliveryCycleActive())
             assertEquals("A cancelled timer generation cannot flush a later queue", 1, transport.count())
-            assertEquals(listOf("later"), events(loadState(root)))
+            assertEquals(listOf("later"), savedEventNames(root))
             val secondTimer = sleeper.wait(60000.0)
             sleeper.release(secondTimer)
             transport.wait(2); transport.complete(1)
@@ -272,7 +263,7 @@ class DeliveryQueueTest {
             first.shutdown()
             val second = configureJvm(c, NoopTransport)
             second.track("b"); second.shutdown()
-            assertEquals(listOf("a", "b"), events(loadState(root)))
+            assertEquals(listOf("a", "b"), savedEventNames(root))
         } finally { root.deleteRecursively() }
     }
 
@@ -309,9 +300,7 @@ class DeliveryQueueTest {
             shutdown.await()
             assertTrue("Cancelled cycle must reject", flush.await().isFailure)
             sleeper.releaseAll()
-            val saved = loadState(root)
-            assertEquals(listOf("a", "c", "d"), events(saved))
-            assertEquals(3, saved.queued.size + saved.active.size)
+            assertEquals(listOf("a", "c", "d"), savedEventNames(root))
             val failures = errors.snapshot()
             assertEquals(1, failures.size)
             assertEquals(listOf("b"), failures.first().events.map { it["event"]?.stringValue })
@@ -330,7 +319,7 @@ class DeliveryQueueTest {
             assertEquals(1, failures.size)
             assertEquals(5, failures.first().events.size)
             assertEquals(0, failures.first().attempts)
-            assertEquals(listOf("e5", "e6", "e7"), events(loadState(root)))
+            assertEquals(listOf("e5", "e6", "e7"), savedEventNames(root))
         } finally { root.deleteRecursively() }
     }
 
@@ -355,12 +344,14 @@ class DeliveryQueueTest {
     @Test fun persistedActiveBatchRestoresBeforeWaitingEventsWithStampsAndResetAttempts() = test {
         val root = root()
         try {
-            val store = JsonStore(root, "default")
-            val state = StoredState()
-            fun event(name: String) = QueueItem.of(jsonObjectOf("type" to "track", "event" to name, "messageId" to name,
-                "timestamp" to "2026-10-13T00:00:00.000Z", "anonymousId" to state.anonymousId))
-            state.active = listOf(event("inflight1"), event("inflight2")); state.queued = ArrayDeque(listOf(event("waiting")))
-            store.save(state); store.saveConsent(false)
+            val first = ManualTransport(); val firstSleeper = ManualSleeper()
+            val before = sdk(root, first, firstSleeper, batchSize = 2)
+            for (name in listOf("inflight1", "inflight2", "waiting")) before.track(name, messageId = name, timestamp = "2026-10-13T00:00:00.000Z")
+            first.wait(1)
+            val shutdown = async(Dispatchers.Default) { before.shutdown() }
+            waitUntil { before.isStopped() }
+            first.complete(0, DeliveryFailure(503, "retry"))
+            shutdown.await(); firstSleeper.releaseAll()
             val transport = ManualTransport(); val sleeper = ManualSleeper()
             transport.autoSucceedFutureRequests()
             val sdk = sdk(root, transport, sleeper)

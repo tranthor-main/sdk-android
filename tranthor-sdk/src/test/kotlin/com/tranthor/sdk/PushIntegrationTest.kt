@@ -184,7 +184,7 @@ class PushIntegrationTest {
     @Test fun anObservationWhoseTrackFailedIsNotRememberedAndARetryIsSent() = runBlocking {
         var failWrites = false
         val sdk = sdk(storeWrite = { bytes, file ->
-            if (failWrites && file.name == "state.json") throw java.io.IOException("disk full")
+            if (failWrites && file.parentFile.name == "queue") throw java.io.IOException("disk full")
             TempRenameFileIo.write(file, bytes)
         })
         sdk.identify("user-1")

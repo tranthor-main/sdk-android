@@ -45,18 +45,18 @@ To clean up, delete/erase the disposable user (including associated events where
 
 - **First event:** Identify, **Track (no auto flush)**, Flush. Expect "Last flush: Succeeded" and one tagged track for the disposable user.
 - **Burst:** tap Track burst (25 by default), then Flush. Expect 25 tracks in batches of up to five under one run ID.
-- **Short outage / retry:** turn **Slow flush** off (Flush interval 500 ms). Enable Airplane mode on the emulator (or phone), tap Track, then disable Airplane mode **within about 10 seconds**. Do not tap Flush: the SDK's retries deliver the event. The example never auto-flushes on reconnect.
-- **Relaunch recovery:** in Airplane mode, Track one or two events and force-stop the app promptly (`adb shell am force-stop com.tranthor.example` or Settings), relaunch, reconnect and Flush. The pending items keep their original run ID and stamps; restart resets the retry attempt count but cannot recover already-discarded batches.
+- **Short outage / retry:** turn **Slow flush** off (Flush interval 500 ms). Enable Airplane mode on the emulator (or phone), tap Track, then disable Airplane mode **within about 10 seconds**. Do not tap Flush: the SDK's retries deliver the event. If the outage outlasts the retries, the event stays queued and delivery pauses for 30 seconds, then 60, 120, 240 and 300; Flush or the app returning from the background tries again at once.
+- **Relaunch recovery:** in Airplane mode, Track one or two events and force-stop the app promptly (`adb shell am force-stop com.tranthor.example` or Settings), relaunch, reconnect and Flush. The pending items keep their original run ID and stamps; restart resets the retry attempt count and the pause. Only batches the server refused for good are gone.
 - **Consent:** offline, enqueue events, then Opt out. Pending events are discarded without error callbacks; Flush succeeds without a request; new calls are discarded until Opt in. Relaunch to check persisted consent.
 - **Background flush:** enable **Slow flush (60 s)**, tap Track once and press Home immediately. The event arrives within seconds (ProcessLifecycleOwner `ON_STOP`, about 700 ms after the activity stops), not after 60 s. Android gives no background execution guarantee: the process can be frozen or killed after Home, in which case the event is delivered on the next launch.
 - **Reset:** note both IDs, Reset identity: no user ID and a new anonymous ID.
-- **Error observation:** during a long offline period, terminal failures appear with count and attempts after about 15.5 seconds per batch, and Flush reports failure (data is discarded at exhaustion).
+- **Error observation:** during a long offline period no error is reported for the queued events and nothing is dropped; Flush reports the failure and the events stay queued. A batch the server refuses (for example with a 400) is reported with count and attempts and then dropped.
 - **Push preview:** see [Push previews on the emulator](#push-previews-on-the-emulator). Local previews and simulated pushes bypass FCM.
 
 ## Automated local checks
 
 ```sh
-scripts/test-emulator.sh             # instrumented conformance, 39 scenarios
+scripts/test-emulator.sh             # instrumented conformance, 44 scenarios
 scripts/test-emulator.sh --example   # plus the example UI tests (Track/Flush, push previews, Home flush)
 ```
 

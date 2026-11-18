@@ -29,7 +29,7 @@ class LifecycleTestActivity : Activity() {
 
 /**
  * Instrumented adapter on the emulator: the real SDK with AndroidPlatform (AtomicFile persistence,
- * HttpURLConnection, ProcessLifecycleOwner hook). Declares all six capabilities with
+ * HttpURLConnection, ProcessLifecycleOwner hook). Declares all seven capabilities with
  * lifecycleSource "os-hook": the `background` step presses the real Home button through
  * UiAutomator, and the runner asserts ProcessLifecycleOwner actually reached CREATED (ON_STOP).
  *
@@ -44,7 +44,7 @@ class InstrumentedConformanceTest {
         private val results = File(target.getExternalFilesDir(null) ?: target.filesDir, "conformance-results.jsonl").apply { writeText("") }
         private var activity: ActivityScenario<LifecycleTestActivity>? = null
         override val adapterName = "TranthorSDK Android instrumented"
-        override val capabilities = listOf("core", "transport", "persistence", "lifecycle", "consent", "identity-link")
+        override val capabilities = listOf("core", "transport", "persistence", "lifecycle", "consent", "identity-link", "durable-queue")
         override val lifecycleSource: String = "os-hook"
         override fun readText(path: String): String =
             instrumentation.context.assets.open(path).use { String(it.readBytes(), Charsets.UTF_8) }

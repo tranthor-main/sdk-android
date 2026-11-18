@@ -17,8 +17,8 @@ Depend on these coordinates:
 
 ```kotlin
 dependencies {
-    implementation("com.tranthor:tranthor-sdk:0.1.0")
-    implementation("com.tranthor:tranthor-push:0.1.0") // optional
+    implementation("com.tranthor:tranthor-sdk:0.2.0")
+    implementation("com.tranthor:tranthor-push:0.2.0") // optional
 }
 ```
 
@@ -83,7 +83,7 @@ Before `identify`, events carry a stored anonymous ID. `identify` with a user ID
 
 ## Consent
 
-`optOut()` is saved to disk, cancels delivery and discards pending events. Calls made while opted out are ignored, and `flush()` returns without a request. `optIn()` resumes collection. The one exception is push: if a phone is registered, a single removal is still delivered so Tranthor stops sending to it.
+`optOut()` is saved to disk, cancels delivery and discards pending events. Calls made while opted out are ignored, and `flush()` returns without a request. If queued events could not be deleted, `optIn()` deletes them first, so they are never sent, and throws `StoreTemporarilyUnavailable` if it still cannot. `optIn()` resumes collection. The one exception is push: if a phone is registered, a single removal is still delivered so Tranthor stops sending to it.
 
 ## Configuration
 
@@ -98,14 +98,16 @@ Before `identify`, events carry a stored anonymous ID. `identify` with a user ID
 | `maxQueueSize` | 10,000 | Pending events kept. The oldest ordinary event is dropped first and reported to `onError`. |
 | `automaticContext` | true | Adds library, OS, device, app, screen, locale and time zone to each event. Your own `context` keys replace them. |
 | `storageNamespace` | `default` | Names the on-disk queue. Two live instances cannot share a namespace in one process. |
-| `storageDirectory` | `noBackupFilesDir/TranthorSDK` | Base directory for stored state. |
+| `storageDirectory` | `noBackupFilesDir/TranthorSDK` | Base directory for stored state and queued events. |
 | `onError` | none | Called once for each batch that fails for good or is dropped, with its events, HTTP status (null for network errors) and attempts. |
 
 ## Delivery
 
-Events are sent as JSON to `/api/public/apps/batch`, one request at a time. Network errors and HTTP 408, 425, 429 and 5xx are retried with backoff, honouring `Retry-After`; other statuses are final. A batch that fails for good is dropped and reported to `onError`.
+Events are sent as JSON to `/api/public/apps/batch`, one request at a time. Network errors and HTTP 408, 425, 429 and 5xx are retried with backoff, honouring `Retry-After`; other statuses are final, and a batch that fails for good is dropped and reported to `onError`.
 
-State is saved atomically before an event call returns, so queued events survive a restart. When the app goes to the background the SDK sends once and pauses if that fails; it resumes when the app returns. Android gives no guarantee that a background process keeps running, so anything undelivered is sent on the next launch.
+Running out of retries never drops events. The batch stays first in the queue, `onError` is not called, and automatic delivery pauses for 30 seconds, then 60, 120, 240 and at most 300 seconds after each further batch that fails all its attempts. During the pause the interval timer, new events and a full batch start no attempt. `flush()` and the app returning from the background try again at once, and `flush()` throws the failure it waited for. A delivered batch resets the pause to 30 seconds, and an app that restarts begins without a pause and sends after the normal flush interval. Events leave the queue only when the server accepts them, when the server refuses them with a final status, on `optOut()`, or when the queue is full.
+
+Each queued event is saved to its own small file in a `queue` folder inside `storageDirectory` before the event call returns, so queued events survive a restart and an event costs the same however long the queue is. Events saved by 0.1.0 are moved into that folder the first time 0.2.0 starts. When the app goes to the background the SDK sends once and pauses if that fails; it resumes when the app returns. Android gives no guarantee that a background process keeps running, so anything undelivered is sent on the next launch.
 
 The push token never appears in `onError`: it is replaced by `"<redacted>"`.
 
@@ -115,10 +117,8 @@ The push token never appears in `onError`: it is replaced by `"<redacted>"`.
 
 ## Current limits
 
-- A batch that exhausts its retries is dropped. With the defaults that is about 15 seconds offline, so longer outages lose events.
 - No compression, alias or group calls, and no automatic screen tracking.
 - No cross-process lock. An app with several processes needs a `storageNamespace` per process.
-- Every event is rewritten to disk on admission, so very large queues cost more per call.
 
 ## Contributing and licence
 

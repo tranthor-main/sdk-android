@@ -57,7 +57,7 @@ class LifecycleOrderingTest {
             assertEquals("Background must make one attempt then pause", 1, transport.attempts.get())
             assertTrue(sdk.deliveryPaused())
             assertTrue(log.snapshot().isEmpty())
-            assertEquals(listOf("home"), events(loadState(root)))
+            assertEquals(listOf("home"), savedEventNames(root))
         } finally { sdk.shutdown(); root.deleteRecursively() }
     }
 
@@ -76,7 +76,7 @@ class LifecycleOrderingTest {
             waitUntil { sdk.deliveryPaused() }
             assertTrue("At most the inactivity attempt plus one background attempt", transport.attempts.get() in 1..2)
             assertTrue("No exhaustion or drop in the background", log.snapshot().isEmpty())
-            assertEquals(listOf("home"), events(loadState(root)))
+            assertEquals(listOf("home"), savedEventNames(root))
         } finally { sdk.shutdown(); root.deleteRecursively() }
     }
 }

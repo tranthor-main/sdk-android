@@ -11,14 +11,14 @@ import org.junit.Test
 
 /**
  * JVM host adapter: the real SDK queue, HttpURLConnection transport and persistence (temp+rename
- * atomic files) against the Node mock. Declares core/transport/persistence/consent and honestly
+ * atomic files) against the Node mock. Declares core/transport/persistence/consent/identity-link/durable-queue and honestly
  * omits lifecycle: a plain JVM has no ProcessLifecycleOwner.
  * Run with scripts/test-host.sh (Gradle property tranthor.conformance).
  */
 class JvmConformanceTest {
     private class JvmEnvironment(private val results: File?) : ConformanceEnvironment {
         override val adapterName = "TranthorSDK Android JVM host"
-        override val capabilities = listOf("core", "transport", "persistence", "consent", "identity-link")
+        override val capabilities = listOf("core", "transport", "persistence", "consent", "identity-link", "durable-queue")
         override val lifecycleSource: String? = null
         private val loader = JvmConformanceTest::class.java.classLoader!!
         override fun readText(path: String): String =

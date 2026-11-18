@@ -560,7 +560,7 @@ class OptOutRemovalTest {
         val removal = RefusedRemoval()
         val failSave = java.util.concurrent.atomic.AtomicBoolean(false)
         val sdk = sdk(maxQueueSize = 3, storeWrite = { bytes, file ->
-            if (failSave.get() && file.name == "state.json") throw java.io.IOException("disk full")
+            if (failSave.get() && file.parentFile.name == "queue") throw java.io.IOException("disk full")
             TempRenameFileIo.write(file, bytes)
         })
         sdk.identify("user-1")

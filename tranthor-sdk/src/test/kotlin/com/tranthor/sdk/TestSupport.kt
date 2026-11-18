@@ -42,11 +42,15 @@ internal class ManualSleeper {
     private val lock = Any()
     private val pending = HashMap<Int, Entry>()
     private val cancelled = HashSet<Int>()
+    private val asked = ArrayList<Double>()
     private var next = 0
+
+    /** Every requested duration in call order, including sleeps that were later cancelled or released. */
+    fun requested(): List<Double> = synchronized(lock) { ArrayList(asked) }
 
     suspend fun sleep(delay: Double) {
         val entry = Entry(delay)
-        val id = synchronized(lock) { next++.also { pending[it] = entry } }
+        val id = synchronized(lock) { asked.add(delay); next++.also { pending[it] = entry } }
         val watcher = CoroutineScope(currentCoroutineContext()).launch(start = CoroutineStart.UNDISPATCHED) {
             try { awaitCancellation() } finally { if (!entry.done) synchronized(lock) { cancelled.add(id) } }
         }
@@ -122,7 +126,15 @@ internal object NoopTransport : SdkTransport {
     override fun send(batch: List<QueueItem>, abort: AbortHandle) {}
 }
 
-internal fun events(state: StoredState): List<String> = state.queued.mapNotNull { it.value["event"]?.stringValue }
+/** The events in the namespace's queue folder in file order: exactly what a restarted instance would send. */
+internal fun savedEvents(directory: File, namespace: String = "default"): List<Map<String, JsonValue>> {
+    val queue = File(JsonStore(directory, namespace).directory, "queue")
+    val names = queue.list { _, name -> name.matches(Regex("\\d{20}\\.json")) }?.sorted() ?: return emptyList()
+    return names.map { JsonValue.parse(File(queue, it).readText()).objectValue!! }
+}
+
+internal fun savedEventNames(directory: File, namespace: String = "default"): List<String> =
+    savedEvents(directory, namespace).mapNotNull { it["event"]?.stringValue }
 
 internal fun loadState(directory: File, namespace: String = "default"): StoredState =
     JsonStore(directory, namespace).load()
@@ -134,9 +146,10 @@ internal suspend fun configureJvm(
     storeWrite: ((ByteArray, File) -> Unit)? = null,
     storeMove: ((File, File) -> Unit)? = null,
     storeRead: ((File) -> ByteArray?)? = null,
+    storeDelete: ((File) -> Unit)? = null,
     platform: Platform = JvmPlatform(),
 ): TranthorSDK = TranthorSDK.create(
     configuration, platform, transport,
     sleep = if (sleeper != null) { ms -> sleeper.sleep(ms) } else ::sleepMilliseconds,
-    storeWrite = storeWrite, storeMove = storeMove, storeRead = storeRead,
+    storeWrite = storeWrite, storeMove = storeMove, storeRead = storeRead, storeDelete = storeDelete,
 )

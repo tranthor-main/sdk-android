@@ -54,6 +54,9 @@ internal object TempRenameFileIo : FileIo {
     override fun move(from: File, to: File) {
         if (!from.renameTo(to)) throw IOException("Unable to move ${from.name}")
     }
+    override fun delete(file: File) {
+        if (file.exists() && !file.delete()) throw IOException("Unable to delete ${file.name}")
+    }
 }
 
 /** A store on the plain JVM: write-temp, fsync, rename. */

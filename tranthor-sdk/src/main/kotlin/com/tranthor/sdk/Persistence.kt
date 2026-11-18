@@ -1,13 +1,14 @@
 package com.tranthor.sdk
 
 import java.io.File
-import java.io.FileOutputStream
 import java.io.IOException
 import java.security.MessageDigest
 import java.util.UUID
 
 /** One admitted event plus its compact JSON, encoded once at admission and reused by every save. */
 internal class QueueItem private constructor(val value: Map<String, JsonValue>, val json: String) {
+    /** The number in the event's file name while it is in the queue folder, or null. */
+    var sequence: Long? = null
     override fun equals(other: Any?): Boolean = other is QueueItem && other.json == json
     override fun hashCode(): Int = json.hashCode()
     override fun toString(): String = json
@@ -22,41 +23,33 @@ internal class StoredState(
     var anonymousId: String = newAnonymousId(),
     var userId: String? = null,
     var optedOut: Boolean = false,
-    var queued: ArrayDeque<QueueItem> = ArrayDeque(),
-    var active: List<QueueItem> = emptyList(),
     /** The push Installation this install last registered, or null. */
     var installation: StoredInstallation? = null,
     /** `Installation Removed` events made by opt-out, delivered even while opted out. */
     var pendingRemovals: MutableList<QueueItem> = ArrayList(),
 ) {
-    /** Encodes from cached item JSON: O(queue bytes), with no re-read or re-decode of the file. */
+    /** Encodes identity, consent, the push installation and opt-out removals; queued events live in their own files. */
     fun encode(): ByteArray {
-        val out = StringBuilder(64 + queued.sumOf { it.json.length + 1 } + active.sumOf { it.json.length + 1 })
+        val out = StringBuilder(256)
         out.append("{\"version\":").append(CURRENT_VERSION).append(",\"anonymousId\":")
         JsonCodec.encode(JsonValue.StringValue(anonymousId), out)
         userId?.let { out.append(",\"userId\":"); JsonCodec.encode(JsonValue.StringValue(it), out) }
         out.append(",\"optedOut\":").append(optedOut)
         installation?.let {
-            // Optional key: older builds ignore it, so CURRENT_VERSION stays 1 (a newer version fails closed).
             out.append(",\"installation\":")
             JsonCodec.encode(JsonValue.of(mapOf("token" to it.token, "appId" to it.appId, "permissionState" to it.permission.wireValue)), out)
         }
         if (pendingRemovals.isNotEmpty()) {
-            // Optional key, like installation: older builds ignore it.
             out.append(",\"pendingRemovals\":[")
             pendingRemovals.forEachIndexed { index, item -> if (index > 0) out.append(','); out.append(item.json) }
             out.append(']')
         }
-        out.append(",\"queued\":[")
-        queued.forEachIndexed { index, item -> if (index > 0) out.append(','); out.append(item.json) }
-        out.append("],\"active\":[")
-        active.forEachIndexed { index, item -> if (index > 0) out.append(','); out.append(item.json) }
-        out.append("]}")
+        out.append('}')
         return out.toString().toByteArray(Charsets.UTF_8)
     }
 
     companion object {
-        const val CURRENT_VERSION = 1
+        const val CURRENT_VERSION = 2
 
         /** Strict decode; any shape/type error is damage (the caller salvages and quarantines). */
         fun decode(bytes: ByteArray): StoredState {
@@ -76,8 +69,7 @@ internal class StoredState(
                 is JsonValue.BooleanValue -> value.value
                 else -> throw IllegalArgumentException("Invalid consent field")
             }
-            return StoredState(anonymous, user, optedOut, ArrayDeque(items(root["queued"])), items(root["active"]),
-                installation(root["installation"]), pendingRemovals(root["pendingRemovals"]))
+            return StoredState(anonymous, user, optedOut, installation(root["installation"]), pendingRemovals(root["pendingRemovals"]))
         }
 
         /** Damaged entries are dropped, not treated as state damage, like a damaged installation. */
@@ -94,12 +86,6 @@ internal class StoredState(
             val permission = InstallationPermission.entries.firstOrNull { it.wireValue == fields["permissionState"]?.stringValue }
                 ?: InstallationPermission.UNKNOWN
             return StoredInstallation(token, appId, permission)
-        }
-
-        private fun items(value: JsonValue?): List<QueueItem> = when (value) {
-            null, JsonValue.Null -> emptyList()
-            is JsonValue.ArrayValue -> value.value.map { QueueItem.of(it.objectValue ?: throw IllegalArgumentException("Invalid queue item")) }
-            else -> throw IllegalArgumentException("Invalid queue")
         }
 
         fun strictInt(value: JsonValue): Int {
@@ -141,6 +127,8 @@ internal interface FileIo {
     fun read(file: File): ByteArray?
     fun write(file: File, bytes: ByteArray)
     fun move(from: File, to: File)
+    /** Removes [file] and any recovery copies; a missing file is not an error. */
+    fun delete(file: File)
 }
 
 /**
@@ -154,8 +142,10 @@ internal class JsonStore(
     private val writeBytes: (ByteArray, File) -> Unit = { bytes, file -> io.write(file, bytes) },
     private val readBytes: (File) -> ByteArray? = { io.read(it) },
     private val moveFile: (File, File) -> Unit = { from, to -> io.move(from, to) },
+    deleteFile: (File) -> Unit = { io.delete(it) },
 ) {
     val directory: File
+    val queue: EventQueue
     val stateFile: File
     val consentFile: File
     val corruptFile: File
@@ -166,6 +156,9 @@ internal class JsonStore(
      * inside optOut() between its consent and state writes.
      */
     var interruptedOptOut: Boolean = false
+        private set
+    /** Set by [load]: the unsent events a release 0.1.0 state file held, for the one-time move into the queue folder. */
+    var legacyEvents: List<QueueItem> = emptyList()
         private set
 
     init {
@@ -184,6 +177,7 @@ internal class JsonStore(
         consentFile = File(directory, "consent.json")
         corruptFile = File(directory, "state.corrupt.json")
         consentCorruptFile = File(directory, "consent.corrupt.json")
+        queue = EventQueue(File(directory, "queue"), writeBytes, readBytes, moveFile, deleteFile)
         ownsVerifiedFile = !stateFile.exists()
     }
 
@@ -195,13 +189,15 @@ internal class JsonStore(
         val consentData = readIfPresent(consentFile)
         val consent = consentData?.let(::decodeConsent)
         var state = StoredState()
+        legacyEvents = emptyList()
         var unsupportedStateVersion = false
         var decodedOptedIn = false
         if (stateData != null) {
-            val decoded = runCatching { StoredState.decode(stateData) }.getOrNull()
+            val decoded = runCatching { StoredState.decode(stateData) to LegacyEvents.read(stateData) }.getOrNull()
             if (decoded != null) {
-                state = decoded
-                decodedOptedIn = !decoded.optedOut
+                state = decoded.first
+                legacyEvents = decoded.second
+                decodedOptedIn = !state.optedOut
             } else {
                 unsupportedStateVersion = StoredState.declaresFutureVersion(stateData)
                 state = StoredState.salvageIdentity(stateData)

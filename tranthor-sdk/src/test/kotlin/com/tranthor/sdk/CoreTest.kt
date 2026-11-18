@@ -21,7 +21,7 @@ class CoreTest {
             store.stateFile.writeText("{broken")
             val fresh = store.load()
             assertTrue(isUuid(fresh.anonymousId))
-            assertTrue(fresh.queued.isEmpty())
+            assertTrue(store.legacyEvents.isEmpty())
             store.save(fresh)
             assertEquals(fresh.anonymousId, store.load().anonymousId)
             assertTrue(store.stateFile.canonicalPath.startsWith(root.canonicalPath + "/"))
@@ -102,7 +102,7 @@ class CoreTest {
             assertNotEquals(anon, resetAnon)
             sdk.track("reset")
             sdk.shutdown()
-            val q = loadState(root, "identity").queued.map { it.value }
+            val q = savedEvents(root, "identity")
             assertEquals(6, q.size)
             assertEquals(anon, q[0]["anonymousId"]?.stringValue); assertNull(q[0]["userId"])
             // The login identify links the stored anonymous ID; later events carry only the user ID.
@@ -122,7 +122,7 @@ class CoreTest {
             val restored = configureJvm(config, NoopTransport)
             assertEquals(resetAnon, restored.anonymousId); assertNull(restored.userId)
             restored.shutdown()
-            assertEquals(q, loadState(root, "identity").queued.map { it.value })
+            assertEquals(q, savedEvents(root, "identity"))
         } finally { root.deleteRecursively() }
     }
 
@@ -162,7 +162,7 @@ class CoreTest {
                 flushIntervalMs = 60000, automaticContext = false, storageDirectory = root), NoopTransport)
             (0 until 200).map { index -> async(kotlinx.coroutines.Dispatchers.Default) { sdk.track("event-$index") } }.awaitAll()
             sdk.shutdown()
-            val events = loadState(root).queued.map { it.value }
+            val events = savedEvents(root)
             assertEquals(200, events.size)
             assertEquals(200, events.mapNotNull { it["messageId"]?.stringValue }.toSet().size)
             assertEquals(200, events.mapNotNull { it["event"]?.stringValue }.toSet().size)
@@ -185,7 +185,7 @@ class CoreTest {
             assertEquals(2, entries.size)
             assertTrue(entries.all { it.attempts == 0 && it.error.status == null && it.events.size == 1 })
             sdk.shutdown()
-            assertTrue(loadState(root).queued.isEmpty())
+            assertTrue(savedEvents(root).isEmpty())
         } finally { root.deleteRecursively() }
     }
 
