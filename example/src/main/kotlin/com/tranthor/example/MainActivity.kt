@@ -150,7 +150,8 @@ fun ExampleScreen(model: ExampleModel) {
         if (model.errors.isEmpty()) Text("None") else model.errors.forEach { Text(it, style = MaterialTheme.typography.bodySmall) }
 
         Section("Push preview (optional module)")
-        Text("Real FCM delivery needs a Firebase project and Tranthor backend support; neither ships today.", style = MaterialTheme.typography.bodySmall)
+        Text("Real FCM pushes need your Firebase options in local.properties and the Firebase key added in Tranthor under Settings > Mobile > Push. See docs/device-testing.md.",
+            style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("realFcmNote"))
         Text(push.firebaseStatus, style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("firebaseStatus"))
         Text("Preview ID: ${push.previewDeliveryId}", style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("pushPreviewId"))
         PermissionButton(push, permissionLauncher::launch)

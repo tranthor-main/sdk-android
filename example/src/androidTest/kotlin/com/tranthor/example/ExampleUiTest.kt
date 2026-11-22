@@ -116,6 +116,14 @@ class ExampleUiTest {
 
     @After fun tearDown() { scenario?.close() }
 
+    /** Tranthor sends real FCM pushes, so the Push section says how to set that up, not that it is unavailable. */
+    @Test fun pushSectionExplainsHowToGetRealFcmPushes() {
+        compose.onNodeWithTag("realFcmNote").performScrollTo()
+        val note = text("realFcmNote")
+        assertTrue(note, "local.properties" in note && "Settings" in note)
+        assertTrue(note, "neither ships" !in note)
+    }
+
     /** The copied FCM token is flagged sensitive so the clipboard UI does not preview it (API 33+). */
     @Test fun copiedTokenIsMarkedSensitive() {
         assumeTrue(Build.VERSION.SDK_INT >= 33 && BuildConfig.DEBUG)
