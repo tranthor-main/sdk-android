@@ -120,7 +120,10 @@ class ExampleUiTest {
     @Test fun pushSectionExplainsHowToGetRealFcmPushes() {
         compose.onNodeWithTag("realFcmNote").performScrollTo()
         val note = text("realFcmNote")
-        assertTrue(note, "local.properties" in note && "Settings" in note)
+        // Every part a reader needs: where the Firebase options go, where the key goes in Tranthor, and the guide.
+        for (part in listOf("local.properties", "Firebase key", "Settings > Mobile > Push", "docs/device-testing.md")) {
+            assertTrue("The note must mention \"$part\": $note", part in note)
+        }
         assertTrue(note, "neither ships" !in note)
     }
 
