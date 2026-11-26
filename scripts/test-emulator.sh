@@ -1,5 +1,5 @@
 #!/bin/bash
-# Instrumented conformance (every scenario of suite 1.5.0, lifecycle via the real ProcessLifecycleOwner) on the
+# Instrumented conformance (every scenario of suite 1.6.0, lifecycle via the real ProcessLifecycleOwner) on the
 # dedicated AVD tranthor-api36. Creates/boots the AVD if needed, routes the 127.0.0.1-only mock with
 # adb reverse, always stops the mock and removes the reverse, and stops the emulator only if this
 # script started it. Local-only: CI does not run emulator tests.
