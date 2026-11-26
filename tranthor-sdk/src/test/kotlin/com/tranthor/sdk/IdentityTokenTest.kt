@@ -19,7 +19,7 @@ import org.junit.Test
 
 /**
  * Identity tokens through the public API, asserted on what reaches a local HTTP server: the token cache and its
- * persistence, the provider, the 403 and 503 answers, the hold and the opt-out removal.
+ * persistence, the provider, refused tokens and unreadable identity settings, the hold and the opt-out removal.
  */
 class IdentityTokenTest {
     private val requests = CopyOnWriteArrayList<MiniHttpServer.Request>()
@@ -311,7 +311,7 @@ class IdentityTokenTest {
         sdk.shutdown()
     }
 
-    // ---- 403 identity_not_verified ----
+    // ---- a refused identity token ----
 
     @Test fun aRefusedTokenIsRenewedAndTheSameBatchIsSentAgainOnce() = runBlocking {
         val renewed = valid("u1", "renewed")
@@ -468,7 +468,7 @@ class IdentityTokenTest {
         sdk.shutdown()
     }
 
-    @Test fun anAppThatNeverUsesIdentityTokensKeepsTheOldBehaviourOnA403() = runBlocking {
+    @Test fun anAppThatNeverUsesIdentityTokensKeepsTheOldBehaviourOnARefusal() = runBlocking {
         respond = { _, _ -> refusal(listOf("u1")) }
         val sdk = sdk(namespace = "never-uses-identity")
         sdk.track("a", userId = "u1")
@@ -502,7 +502,7 @@ class IdentityTokenTest {
         sdk.identify("u1", identityToken = jwt("u1", now / 1000 + 10))
         sdk.flush()
         assertEquals(listOf("u1"), stored("evict").tokens.users)
-        clock = now + 10_000 + 121_000 // past exp + 2 minutes
+        clock = now + 10_000 + 121_000 // long past its expiry
         sdk.track("later"); sdk.flush()
         assertTrue("expired token evicted", stored("evict").tokens.isEmpty())
         val fresh = valid("u1", "fresh")
@@ -529,7 +529,7 @@ class IdentityTokenTest {
         sdk.shutdown()
     }
 
-    @Test fun anErrorBodyThatIsNotJsonStaysAnOrdinary403() = runBlocking {
+    @Test fun anErrorBodyThatIsNotJsonStaysAnOrdinaryRefusal() = runBlocking {
         respond = { _, _ -> MiniHttpServer.Response(403, body = "<html>forbidden</html>".toByteArray()) }
         val sdk = sdk()
         sdk.track("a", userId = "u1")
@@ -539,7 +539,7 @@ class IdentityTokenTest {
         sdk.shutdown()
     }
 
-    // ---- 503 identity_*_unavailable ----
+    // ---- identity settings the server cannot read ----
 
     @Test fun anUnavailableIdentityServiceHoldsTheBatchForRetryAfterEvenWithNoRetries() = runBlocking {
         val sleeper = ManualSleeper()
@@ -804,7 +804,7 @@ class IdentityTokenTest {
         val sdk = sdk(retries = 2, namespace = "never-used-anonymous")
         sdk.track("anonymous")
         assertThrows(DeliveryFailure::class.java) { runBlocking { sdk.flush() } }
-        assertEquals("a final 403, not retried", 1, requests.size)
+        assertEquals("a final refusal, not retried", 1, requests.size)
         assertEquals(1, errors.snapshot().size)
         assertTrue(notices.isEmpty())
         sdk.shutdown()
@@ -824,6 +824,122 @@ class IdentityTokenTest {
     }
 
     // ---- a blocking supplier ----
+
+    // ---- who is the current user after a relaunch ----
+
+    private fun stateFile(namespace: String) = JsonStore(root, namespace).stateFile
+
+    @Test fun aSignedOutUsersQueuedEventsAreNotTheCurrentUsersAfterARelaunch() = runBlocking {
+        val first = sdk(namespace = "signed-out-relaunch")
+        first.identify("u1", identityToken = valid("u1"))
+        first.track("queued before sign-out")
+        first.reset()
+        first.shutdown()
+        respond = { _, _ -> refusal(listOf("u1")) }
+        val second = sdk(provider = { null }, namespace = "signed-out-relaunch", sleeper = ManualSleeper())
+        runCatching { second.flush() }
+        waitUntil { errors.snapshot().isNotEmpty() }
+        assertEquals("dropped and reported once, not held", 2, errors.snapshot().sumOf { it.events.size })
+        assertTrue(savedEvents(root, "signed-out-relaunch").isEmpty())
+        assertTrue(notices.isEmpty())
+        second.shutdown()
+    }
+
+    @Test fun afterASignOutADrainAndTwoRelaunchesTheNextFirstUsersRefusedEventIsHeld() = runBlocking {
+        val first = sdk(namespace = "drained-relaunch")
+        first.identify("u1", identityToken = valid("u1"))
+        first.reset()
+        first.flush() // the queue is empty now, so the next start numbers its events from 1 again
+        first.shutdown()
+        sdk(namespace = "drained-relaunch").shutdown()
+        sdk(namespace = "drained-relaunch").shutdown()
+        respond = { _, _ -> refusal(listOf("u2")) }
+        val third = sdk(provider = { null }, namespace = "drained-relaunch", sleeper = ManualSleeper())
+        third.track("first event of a new user", userId = "u2")
+        assertThrows(DeliveryFailure::class.java) { runBlocking { third.flush() } }
+        assertTrue("held, not dropped", errors.snapshot().isEmpty())
+        assertEquals(1, savedEvents(root, "drained-relaunch").size)
+        third.shutdown()
+    }
+
+    @Test fun aSalvagedOrUnreadableStateFileDoesNotMakeASignedOutUserCurrentAgain() = runBlocking {
+        for ((name, damage) in listOf<Pair<String, (String) -> String>>(
+            "unreadable" to { "{" },
+            "salvaged" to { text -> text.replace(Regex("\"anonymousId\":\"[^\"]*\""), "\"anonymousId\":\"not-a-uuid\"") },
+        )) {
+            val namespace = "damaged-$name"
+            val first = sdk(namespace = namespace)
+            first.identify("u1", identityToken = valid("u1"))
+            first.track("queued before sign-out")
+            first.reset()
+            first.shutdown()
+            val file = stateFile(namespace)
+            file.writeText(damage(file.readText()))
+            requests.clear()
+            respond = { _, _ -> refusal(listOf("u1")) }
+            val second = sdk(provider = { null }, namespace = namespace, sleeper = ManualSleeper())
+            runCatching { second.flush() }
+            waitUntil { errors.snapshot().isNotEmpty() }
+            assertTrue("$name: the signed-out user's events were dropped and reported, not held", savedEvents(root, namespace).isEmpty())
+            second.shutdown()
+        }
+    }
+
+    // ---- the held queue, the restored timer and the notice ----
+
+    @Test fun aHoldTrimsTheQueueToItsLimitAsItStarts() = runBlocking {
+        respond = { _, _ -> refusal(listOf("u1")) }
+        val sleeper = ManualSleeper()
+        // The provider hangs, so the first send waits for it while more events are queued behind it (no hold, so no limit yet).
+        val sdk = sdk(provider = { awaitCancellation() }, sleeper = sleeper, namespace = "trim-on-hold", batchSize = 1)
+        sdk.identify("u1")
+        val providerWait = sleeper.wait(20_000.0)
+        repeat(HELD_QUEUE_LIMIT + 199) { sdk.track("e$it", userId = "u1") }
+        sleeper.release(providerWait) // the provider times out; the send is refused; the batch is held
+        waitUntil { errors.snapshot().sumOf { it.events.size } >= 200 }
+        assertEquals("the limit applies as the hold starts, not at the next admitted event", HELD_QUEUE_LIMIT, savedEvents(root, "trim-on-hold").size)
+        assertTrue(errors.snapshot().all { it.attempts == 0 })
+        sdk.shutdown()
+    }
+
+    @Test fun aRestoredRemovalThatAnOfflineFailureParkedDoesNotGetATimer() = runBlocking {
+        val sleeper = ManualSleeper()
+        var failQueueWrite = false
+        val sdk = configureJvm(Configuration("Basic k==", host = server.url, batchSize = 100, flushIntervalMs = 61_000, retries = 0, baseDelay = 10,
+            storageNamespace = "offline-parked", storageDirectory = root, onError = { errors.append(it) }),
+            sleeper = sleeper, storeWrite = { bytes, file ->
+                if (failQueueWrite && file.parentFile?.name == "queue") throw java.io.IOException("disk full")
+                TempRenameFileIo.write(file, bytes)
+            })
+        sdk.identify("u1")
+        sdk.registerInstallation("fcm-token-1", "com.example", InstallationPermission.GRANTED)
+        sdk.flush()
+        respond = { _, _ -> MiniHttpServer.Response(503) } // an ordinary failure parks the removal until the next trigger
+        sdk.optOut()
+        waitUntil { requests.size >= 1 }
+        waitUntil { !sdk.deliveryCycleActive() }
+        failQueueWrite = true // optIn cannot save the registration it queues
+        assertThrows(TranthorException.StoreTemporarilyUnavailable::class.java) { runBlocking { sdk.optIn() } }
+        // Only an identity refusal parks a removal on a timer; this one waits for a trigger, as before.
+        assertThrows(TestTimeout::class.java) { runBlocking { sleeper.wait(60_000.0) } }
+        sdk.shutdown()
+    }
+
+    @Test fun theHoldNoticeStatesTheHoldThatIsApplied() = runBlocking {
+        // u1 is set aside for 60 s; the rest of the batch then meets a server delay of 1 s, so 60 s is what is applied.
+        respond = { _, request ->
+            val first = JsonValue.parse(request.body.toString(Charsets.UTF_8))["batch"]!!.arrayValue!!.map { it["userId"]?.stringValue }
+            if ("u1" in first) refusal(listOf("u1")) else MiniHttpServer.Response(503, mapOf("Retry-After" to "1", "Content-Type" to "application/json"),
+                """{"code":"identity_settings_unavailable"}""".toByteArray())
+        }
+        val sdk = sdk(batchSize = 2, sleeper = ManualSleeper(), provider = { null }, namespace = "notice-hold")
+        sdk.identify("u2", identityToken = valid("u2"))
+        sdk.identify("u1")
+        assertThrows(DeliveryFailure::class.java) { runBlocking { sdk.flush() } }
+        val unavailable = notices.first { it.kind == NoticeKind.IDENTITY_UNAVAILABLE }
+        assertTrue(unavailable.message, unavailable.message.contains("60 s"))
+        sdk.shutdown()
+    }
 
     @Test fun anAbandonedBlockingProviderCallIsNotFollowedByAnotherUntilItReturns() = runBlocking {
         val gate = java.util.concurrent.CountDownLatch(1)

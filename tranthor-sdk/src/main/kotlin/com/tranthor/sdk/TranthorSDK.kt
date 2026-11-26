@@ -168,7 +168,8 @@ public class TranthorSDK private constructor(
         state.pendingRemovals = ArrayList(removals)
         if (parked != null && removals.isNotEmpty()) {
             removalParked = parked
-            startRemovalRetry(timings.providerBackoffMs)
+            // Only a removal that an identity refusal parked retries on a timer; any other waits for the next trigger.
+            if (parked.code == IDENTITY_NOT_VERIFIED) startRemovalRetry(timings.providerBackoffMs)
         }
     }
 
@@ -456,9 +457,12 @@ public class TranthorSDK private constructor(
         val previousSentInstallation = sentInstallation
         val outgoing = currentUser()
         val previousNotedUser = notedUser
+        val previousCurrentUserFrom = state.currentUserFrom
         val tokensBefore = state.tokens.copy()
         state.userId = null
         notedUser = null
+        // The queued events (and the removal queued below) are the outgoing user's; the next events are the next user's.
+        state.currentUserFrom = store.queue.nextSequenceNumber + if (removal != null) 1 else 0
         state.anonymousId = newAnonymousId()
         sentInstallation = null
         // The outgoing user's identity token stays until their queued events (the removal among them) have been sent.
@@ -472,6 +476,7 @@ public class TranthorSDK private constructor(
             state.anonymousId = previousAnonymousId
             sentInstallation = previousSentInstallation
             notedUser = previousNotedUser
+            state.currentUserFrom = previousCurrentUserFrom
             state.tokens = tokensBefore
             throw error
         }
@@ -484,7 +489,7 @@ public class TranthorSDK private constructor(
      * a stored push Installation is removed on the server by one durable `Installation Removed`,
      * delivered even while opted out. It gets one attempt cycle; after a retryable failure it waits,
      * with no timer, for the next app start, return to the foreground, [optIn] or [optOut], each of
-     * which makes one new cycle, until the server accepts or rejects it. A `403 identity_not_verified` never rejects it:
+     * which makes one new cycle, until the server accepts or rejects it. A refused identity token never rejects it:
      * after one renewal through the identity provider it stays, is retried every 60 seconds, and each failed attempt is
      * reported to `onError` with the push token redacted.
      */
@@ -739,6 +744,8 @@ public class TranthorSDK private constructor(
     private fun startHold(hold: Hold) {
         held = true
         currentHold = hold
+        // The limit applies as the hold begins, not only when the next event is admitted.
+        reportDropped(store.queue.trim(maxOf(0, HELD_QUEUE_LIMIT - store.queue.activeCount)).map { it.value })
         holdTimer?.cancel()
         holdTimer = scope.launch {
             try { sleep(hold.ms.toDouble()) } catch (_: CancellationException) { return@launch }
@@ -944,9 +951,10 @@ public class TranthorSDK private constructor(
                 // The server could not read its identity settings. Nothing is wrong with the batch: keep it for Retry-After.
                 val ms = if (failure.retryAfterGiven) failure.heldAfterMs.toLong().coerceIn(UNAVAILABLE_HOLD_MIN_MS, UNAVAILABLE_HOLD_MAX_MS)
                 else UNAVAILABLE_HOLD_DEFAULT_MS
-                notice(NoticeKind.IDENTITY_UNAVAILABLE, "The server could not read its identity settings; delivery is held for ${ms / 1000} s and nothing is dropped.")
                 // A hold set aside for the current user's missing token outlasts the server's delay if it is longer.
-                return Outcome(false, null, sends, Hold(maxOf(ms, pendingHold?.ms ?: 0L), failure))
+                val applied = maxOf(ms, pendingHold?.ms ?: 0L)
+                notice(NoticeKind.IDENTITY_UNAVAILABLE, "The server could not read its identity settings; delivery is held for ${applied / 1000} s and nothing is dropped.")
+                return Outcome(false, null, sends, Hold(applied, failure))
             }
             // A background window makes one attempt and never sleeps through a retry.
             if (backgroundToken != null && retryable) { paused = true; break }
@@ -1156,7 +1164,8 @@ public class TranthorSDK private constructor(
     private suspend fun start(removed: List<Map<String, JsonValue>>) = withContext(dispatcher) {
         reportDropped(removed)
         // An app that never calls identify has no stored user: the first user in the restored queue is the current one.
-        if (state.userId.isNullOrEmpty()) notedUser = store.queue.queuedItems.firstNotNullOfOrNull { userIdOf(it) }
+        // Events numbered below `currentUserFrom` belong to a user who signed out before the relaunch.
+        if (state.userId.isNullOrEmpty()) notedUser = store.queue.queuedItems.firstNotNullOfOrNull { item -> userIdOf(item)?.takeIf { (item.sequence ?: 0L) >= state.currentUserFrom } }
         // A later Registered must stay strictly after a stored removal even if the clock went back.
         state.pendingRemovals.mapNotNull { item -> item.value["timestamp"]?.stringValue?.let(::parseTimestamp) }.maxOrNull()
             ?.let { installationClockMs = maxOf(installationClockMs, it) }
@@ -1202,7 +1211,12 @@ public class TranthorSDK private constructor(
                         deleteFile = storeDelete ?: { io.delete(it) })
                     val restored = store.load()
                     // An opted-out user's files are deleted; any that remain are deleted again by the next start or by optIn().
-                    if (restored.optedOut) store.queue.deleteAllFiles() else store.queue.load(store.legacyEvents)
+                    if (restored.optedOut) store.queue.deleteAllFiles() else {
+                        store.queue.load(store.legacyEvents, restored.currentUserFrom)
+                        // Only the identity survived a damaged state file: whose the queued events are is unknown, so they all count
+                        // as a signed-out user's, which is safe: they are never held against the next user.
+                        if (store.stateWasDamaged) restored.currentUserFrom = store.queue.nextSequenceNumber
+                    }
                     // Before the first save below, which would hide that the opt-out was interrupted.
                     if (store.interruptedOptOut) restored.installation?.takeIf { restored.userId != null }?.let {
                         restored.pendingRemovals.add(optOutRemoval(restored, it, timestamp(platform.currentTimeMs())))

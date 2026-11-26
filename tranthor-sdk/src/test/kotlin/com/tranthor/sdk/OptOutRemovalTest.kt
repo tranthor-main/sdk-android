@@ -19,8 +19,7 @@ class OptOutRemovalTest {
     private val requests = CopyOnWriteArrayList<MiniHttpServer.Request>()
     @Volatile private var status = 204
     @Volatile private var respond: (MiniHttpServer.Request) -> Int = { status }
-    // The answer is chosen before the request is visible to the test, so a test that changes `status` after seeing it cannot change this answer.
-    private val server = MiniHttpServer { request -> val status = respond(request); requests.add(request); MiniHttpServer.Response(status) }
+    private val server = MiniHttpServer { request -> requests.add(request); MiniHttpServer.Response(respond(request)) }
     private val root: File = tempRoot("tranthor-opt-out-removal")
 
     @After fun stop() { server.close(); root.deleteRecursively() }
@@ -140,7 +139,9 @@ class OptOutRemovalTest {
     }
 
     @Test fun optingBackInMakesOneNewCycleThatSendsTheRemovalFirstAndRegistersStrictlyLater() = runBlocking {
-        status = 503
+        // The first request is answered 503 and every later one 204, decided as each request arrives (the hooks of other tests
+        // count requests the same way), so the test never races its own change of `status` against the first response.
+        respond = { if (requests.size == 1) 503 else 204 }
         // The flush interval never elapses (nothing releases the sleeper), so the queued identify and registration cannot
         // be sent by a timer before optOut() on a slow machine: only the opt-out removal is ever the first request.
         val sleeper = ManualSleeper()
@@ -149,7 +150,6 @@ class OptOutRemovalTest {
         sdk.registerInstallation("fcm-token-1", "com.example.shop", InstallationPermission.GRANTED)
         sdk.optOut()
         waitUntil { requests.size >= 1 }
-        status = 204
         waitUntil { !sdk.deliveryCycleActive() } // the exhausted cycle has ended
         // An exhausted cycle waits for a trigger: it arms no timer and starts no cycle.
         assertNull(sdk.pendingTimer())

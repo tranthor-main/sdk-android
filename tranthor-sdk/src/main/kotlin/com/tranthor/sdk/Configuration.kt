@@ -14,7 +14,7 @@ import java.io.File
  * the SDK waits at most 20 seconds for it, so a slow or failing provider delays a send by at most 20 seconds and never keeps events back.
  * @property onNotice receives diagnostics that are not delivery failures, see [Notice]. It runs on the SDK's serial
  * executor: return promptly.
- * @property appId sent as `x-tranthor-app-id` on every request. Null (the default) sends the application's
+ * @property appId sent with every request. Null (the default) sends the application's
  * package name. A value that cannot be an HTTP header value (empty, spaces at either end, a newline or any character
  * outside printable ASCII) makes [TranthorSDK.configure] throw [TranthorException.InvalidAppId]; the SDK never sends
  * an id you did not choose.
@@ -104,7 +104,7 @@ public class Configuration private constructor(
         /** Java hosts: a blocking supplier of the same thing. It runs on a background thread. */
         public fun identityTokenSupplier(value: IdentityTokenSupplier?): Builder =
             apply { identityTokenProvider = value?.let { supplier -> { userId -> supplier.tokenFor(userId) } } }
-        /** Sent as `x-tranthor-app-id` on every request; null sends the application's package name. */
+        /** Sent with every request; null sends the application's package name. */
         public fun appId(value: String?): Builder = apply { appId = value }
         /** Receives diagnostics that are not delivery failures (see [Notice]); runs on the SDK's serial executor. */
         public fun onNotice(value: NoticeListener?): Builder = apply { onNotice = value?.let { listener -> { listener.onNotice(it) } } }
@@ -187,7 +187,7 @@ public fun interface IdentityTokenSupplier {
 
 /**
  * A delivery failure: [status] is null for network failures (timeouts, TLS, dropped connections). [code] is the
- * server's machine-readable error code for a 403 or 503 (for example `write_key_app_not_allowed`), or null.
+ * server's machine-readable error code for a refused request (for example when a write key is limited to other apps), or null.
  */
 public class DeliveryFailure internal constructor(
     public val status: Int?,

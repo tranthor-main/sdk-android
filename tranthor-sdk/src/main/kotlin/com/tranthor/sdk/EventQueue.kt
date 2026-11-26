@@ -23,6 +23,8 @@ internal class EventQueue(
     /** Files of events that are already gone from memory (sent or refused) but could not be deleted yet. */
     private val awaitingDeletion = LinkedHashSet<Long>()
 
+    /** The number the next admitted event gets. */
+    val nextSequenceNumber: Long get() = nextSequence
     val hasQueued: Boolean get() = queued.isNotEmpty()
     val queuedCount: Int get() = queued.size
     val activeCount: Int get() = active.size
@@ -38,7 +40,7 @@ internal class EventQueue(
      * Throws [TranthorException.StoreTemporarilyUnavailable] when a file cannot be read, and [IOException]
      * when the folder cannot be listed.
      */
-    fun load(legacy: List<QueueItem>) {
+    fun load(legacy: List<QueueItem>, minNextSequence: Long = 0) {
         queued.clear(); active = emptyList(); awaitingDeletion.clear()
         if (legacy.isNotEmpty()) {
             ensureDirectory()
@@ -67,7 +69,9 @@ internal class EventQueue(
         }
         // Set-aside files keep their numbers, so a later event never takes the name of one.
         val highest = names.mapNotNull { NUMBERED_FILE.matchEntire(it)?.groupValues?.get(1)?.toLongOrNull() }.maxOrNull() ?: 0L
-        nextSequence = highest + 1
+        // A marker the state file keeps (see StoredState.currentUserFrom) must stay below every new event's number, also
+        // when the folder is empty and would otherwise number from 1 again.
+        nextSequence = maxOf(highest + 1, minNextSequence)
     }
 
     private fun listNames(): Array<String> = directory.list() ?: throw IOException("Unable to list the event queue")

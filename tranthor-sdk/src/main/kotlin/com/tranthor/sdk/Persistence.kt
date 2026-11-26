@@ -31,6 +31,12 @@ internal class StoredState(
     var tokens: TokenCache = TokenCache(),
     /** Set once an identity token has been passed to `identify`; it is never cleared. See [TranthorSDK] identity in use. */
     var identityTokenSupplied: Boolean = false,
+    /**
+     * The queue number at which the current user's events begin: queued events numbered below it belong to a user who has
+     * signed out. Set by reset(); 0 means every queued event is the current user's. It outlives an empty queue
+     * (the queue folder renumbers from the marker at load) and a salvaged state file.
+     */
+    var currentUserFrom: Long = 0,
 ) {
     /** Encodes identity, consent, the push installation and opt-out removals; queued events live in their own files. */
     fun encode(): ByteArray {
@@ -45,6 +51,7 @@ internal class StoredState(
         }
         // Optional key: set once an identity token has been passed to identify; identity stays "in use" after refusals delete tokens.
         if (identityTokenSupplied) out.append(",\"identityTokenSupplied\":true")
+        if (currentUserFrom > 0) out.append(",\"currentUserFrom\":").append(currentUserFrom)
         if (!tokens.isEmpty()) {
             // Optional key, like installation: older builds ignore it. A token is a credential: it is written
             // here, with the same protection as the queue, and nowhere else.
@@ -82,8 +89,11 @@ internal class StoredState(
                 else -> throw IllegalArgumentException("Invalid consent field")
             }
             return StoredState(anonymous, user, optedOut, installation(root["installation"]), pendingRemovals(root["pendingRemovals"]),
-                tokens(root["identityTokens"]), root["identityTokenSupplied"]?.booleanValue == true)
+                tokens(root["identityTokens"]), root["identityTokenSupplied"]?.booleanValue == true, currentUserFrom(root))
         }
+
+        private fun currentUserFrom(root: Map<String, JsonValue>): Long =
+            root["currentUserFrom"]?.numberValue?.takeIf { it.isFinite() && it >= 0 && it < 9.0e15 }?.toLong() ?: 0L
 
         /** A damaged entry is dropped, not treated as state damage: the provider supplies the token again. */
         private fun tokens(value: JsonValue?): TokenCache {
@@ -122,6 +132,7 @@ internal class StoredState(
             result.userId = root["userId"]?.stringValue
             // Identity stays in use: without the flag a refusal would drop a batch the app expects to be held.
             result.identityTokenSupplied = root["identityTokenSupplied"]?.booleanValue == true
+            result.currentUserFrom = currentUserFrom(root)
             return result
         }
 
@@ -179,6 +190,9 @@ internal class JsonStore(
      */
     var interruptedOptOut: Boolean = false
         private set
+    /** Set by [load] when the state file was damaged and only its identity was kept: which queued events are the current user's is unknown. */
+    var stateWasDamaged: Boolean = false
+        private set
     /** Set by [load]: the unsent events a release 0.1.0 state file held, for the one-time move into the queue folder. */
     var legacyEvents: List<QueueItem> = emptyList()
         private set
@@ -223,6 +237,7 @@ internal class JsonStore(
             } else {
                 unsupportedStateVersion = StoredState.declaresFutureVersion(stateData)
                 state = StoredState.salvageIdentity(stateData)
+                stateWasDamaged = true
                 quarantine(stateFile, corruptFile)
             }
         }
