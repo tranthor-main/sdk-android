@@ -912,6 +912,49 @@ class IdentityTokenTest {
 
     // ---- the held queue, the restored timer and the notice ----
 
+    @Test fun aMisTypedCurrentUserMarkerTakesTheDamagePathNotTheDefault() {
+        val id = java.util.UUID.randomUUID()
+        assertThrows(IllegalArgumentException::class.java) { StoredState.decode("""{"version":2,"anonymousId":"$id","currentUserFrom":"soon"}""".toByteArray()) }
+        assertThrows(IllegalArgumentException::class.java) { StoredState.decode("""{"version":2,"anonymousId":"$id","currentUserFrom":-3}""".toByteArray()) }
+        assertEquals(7L, StoredState.decode("""{"version":2,"anonymousId":"$id","currentUserFrom":7}""".toByteArray()).currentUserFrom)
+        assertEquals(0L, StoredState.decode("""{"version":2,"anonymousId":"$id"}""".toByteArray()).currentUserFrom)
+    }
+
+    @Test fun theMarkerAppliesToTheQueueOfAnAppThatStartsOptedOut() = runBlocking {
+        val first = sdk(namespace = "optedout-marker")
+        first.identify("u1", identityToken = valid("u1"))
+        first.track("queued before sign-out")
+        first.reset()
+        first.optOut()
+        first.shutdown()
+        respond = { _, _ -> refusal(listOf("u2")) }
+        val second = sdk(provider = { null }, namespace = "optedout-marker", sleeper = ManualSleeper())
+        second.optIn()
+        second.track("first event of a new user", userId = "u2") // numbered after the marker, not from 1 again
+        second.shutdown()
+        val third = sdk(provider = { null }, namespace = "optedout-marker", sleeper = ManualSleeper())
+        assertThrows(DeliveryFailure::class.java) { runBlocking { third.flush() } }
+        assertTrue("held, not dropped as a signed-out user's", errors.snapshot().isEmpty())
+        assertEquals(1, savedEvents(root, "optedout-marker").size)
+        third.shutdown()
+    }
+
+    @Test fun aPreviousUsersRemovalThatStaysGetsItsOwnNoticeBesideTheCurrentUsersHold() = runBlocking {
+        val sleeper = ManualSleeper()
+        val first = sdk(provider = { null }, namespace = "two-notices", sleeper = sleeper)
+        first.identify("u0", identityToken = valid("u0"))
+        first.registerInstallation("fcm-token-1", "com.example", InstallationPermission.GRANTED)
+        first.flush()
+        requests.clear()
+        respond = { _, _ -> refusal(listOf("u0", "u1")) }
+        first.reset() // queues u0's removal; u0 is a previous user now
+        first.identify("u1") // u1 has no token and the provider supplies none
+        assertThrows(DeliveryFailure::class.java) { runBlocking { first.flush() } }
+        assertEquals("one notice for the current user's hold and one for the removal that stays", 2, notices.count { it.kind == NoticeKind.IDENTITY_REFUSED })
+        assertTrue(notices.any { it.message.contains("removal") })
+        first.shutdown()
+    }
+
     @Test fun aHoldTrimsTheQueueToItsLimitAsItStarts() = runBlocking {
         respond = { _, _ -> refusal(listOf("u1")) }
         val sleeper = ManualSleeper()

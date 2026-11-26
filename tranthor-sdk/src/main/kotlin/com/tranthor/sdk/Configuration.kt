@@ -187,7 +187,7 @@ public fun interface IdentityTokenSupplier {
 
 /**
  * A delivery failure: [status] is null for network failures (timeouts, TLS, dropped connections). [code] is the
- * server's machine-readable error code for a refused request (for example when a write key is limited to other apps), or null.
+ * server's machine-readable error code for certain server error responses (for example when a write key is limited to other apps), or null.
  */
 public class DeliveryFailure internal constructor(
     public val status: Int?,

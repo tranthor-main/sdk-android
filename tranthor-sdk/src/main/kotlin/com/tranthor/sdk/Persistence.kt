@@ -89,11 +89,16 @@ internal class StoredState(
                 else -> throw IllegalArgumentException("Invalid consent field")
             }
             return StoredState(anonymous, user, optedOut, installation(root["installation"]), pendingRemovals(root["pendingRemovals"]),
-                tokens(root["identityTokens"]), root["identityTokenSupplied"]?.booleanValue == true, currentUserFrom(root))
+                tokens(root["identityTokens"]), root["identityTokenSupplied"]?.booleanValue == true, currentUserFrom(root, strict = true))
         }
 
-        private fun currentUserFrom(root: Map<String, JsonValue>): Long =
-            root["currentUserFrom"]?.numberValue?.takeIf { it.isFinite() && it >= 0 && it < 9.0e15 }?.toLong() ?: 0L
+        /** Strict (decoding): a marker that is present but not a non-negative whole number is damage. Lenient (salvaging): it reads as 0. */
+        private fun currentUserFrom(root: Map<String, JsonValue>, strict: Boolean): Long {
+            val value = root["currentUserFrom"] ?: return 0L
+            val number = value.numberValue?.takeIf { it.isFinite() && it >= 0 && it < 9.0e15 && it == Math.floor(it) }
+            if (number == null && strict) throw IllegalArgumentException("Invalid current user marker")
+            return number?.toLong() ?: 0L
+        }
 
         /** A damaged entry is dropped, not treated as state damage: the provider supplies the token again. */
         private fun tokens(value: JsonValue?): TokenCache {
@@ -132,7 +137,7 @@ internal class StoredState(
             result.userId = root["userId"]?.stringValue
             // Identity stays in use: without the flag a refusal would drop a batch the app expects to be held.
             result.identityTokenSupplied = root["identityTokenSupplied"]?.booleanValue == true
-            result.currentUserFrom = currentUserFrom(root)
+            result.currentUserFrom = currentUserFrom(root, strict = false)
             return result
         }
 

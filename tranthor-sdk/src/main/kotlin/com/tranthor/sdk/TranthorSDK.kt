@@ -944,7 +944,7 @@ public class TranthorSDK private constructor(
                     val hold = Hold(timings.providerBackoffMs, refusalFailure(failure))
                     // Each failed attempt for a removal that stays is a notice (nothing was dropped); a hold for the current
                     // user's missing token has just raised its own.
-                    if (!holdCurrent && kept.any(::isInstallationRemoval)) noticeRemovalParked(hold)
+                    if (kept.any { isInstallationRemoval(it) && (!holdCurrent || userIdOf(it) != currentUser) }) noticeRemovalParked(hold)
                     // The other users' events (and anonymous ones) in this batch go first, in one request; only the kept
                     // items wait. Events queued behind the held ones still wait for them: that limit is deliberate.
                     if (kept.size == batch().size || pendingHold != null) return Outcome(false, null, sends, hold)
@@ -1217,7 +1217,10 @@ public class TranthorSDK private constructor(
                         deleteFile = storeDelete ?: { io.delete(it) })
                     val restored = store.load()
                     // An opted-out user's files are deleted; any that remain are deleted again by the next start or by optIn().
-                    if (restored.optedOut) store.queue.deleteAllFiles() else {
+                    if (restored.optedOut) {
+                        store.queue.deleteAllFiles()
+                        store.queue.numberFrom(restored.currentUserFrom) // the marker still applies after an opt-in
+                    } else {
                         store.queue.load(store.legacyEvents, restored.currentUserFrom)
                         // Only the identity survived a damaged state file: whose the queued events are is unknown, so they all count
                         // as a signed-out user's, which is safe: they are never held against the next user.

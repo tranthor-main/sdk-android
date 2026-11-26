@@ -23,6 +23,9 @@ internal class EventQueue(
     /** Files of events that are already gone from memory (sent or refused) but could not be deleted yet. */
     private val awaitingDeletion = LinkedHashSet<Long>()
 
+    /** After the files are gone (opted out at start): new events are numbered from [minimum] at least. */
+    fun numberFrom(minimum: Long) { nextSequence = maxOf(nextSequence, minimum) }
+
     /** The number the next admitted event gets. */
     val nextSequenceNumber: Long get() = nextSequence
     val hasQueued: Boolean get() = queued.isNotEmpty()
@@ -42,6 +45,8 @@ internal class EventQueue(
      */
     fun load(legacy: List<QueueItem>, minNextSequence: Long = 0) {
         queued.clear(); active = emptyList(); awaitingDeletion.clear()
+        // Also when the folder does not exist or is empty: numbers never start below the state file's marker.
+        nextSequence = maxOf(1L, minNextSequence)
         if (legacy.isNotEmpty()) {
             ensureDirectory()
             legacy.forEachIndexed { index, item -> writeBytes(item.json.toByteArray(Charsets.UTF_8), fileFor(index + 1L)) }
