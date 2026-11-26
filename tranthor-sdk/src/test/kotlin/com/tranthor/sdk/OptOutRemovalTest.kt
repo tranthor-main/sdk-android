@@ -7,6 +7,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -18,18 +19,36 @@ class OptOutRemovalTest {
     private val requests = CopyOnWriteArrayList<MiniHttpServer.Request>()
     @Volatile private var status = 204
     @Volatile private var respond: (MiniHttpServer.Request) -> Int = { status }
-    private val server = MiniHttpServer { request -> requests.add(request); MiniHttpServer.Response(respond(request)) }
+    // The answer is chosen before the request is visible to the test, so a test that changes `status` after seeing it cannot change this answer.
+    private val server = MiniHttpServer { request -> val status = respond(request); requests.add(request); MiniHttpServer.Response(status) }
     private val root: File = tempRoot("tranthor-opt-out-removal")
 
     @After fun stop() { server.close(); root.deleteRecursively() }
 
+    /**
+     * A short [flushIntervalMs] is real time, so on a slow machine the interval could elapse between the test's setup calls
+     * and its `optOut()` and send the queued identify and registration first. Unless [gated] is false, an SDK that is not
+     * opted out yet therefore never lets the interval elapse until it has been seen opted out (an instance restarted opted
+     * out runs freely at once). The interval is still real time after that, which is what the tests about it measure.
+     */
     private suspend fun sdk(
         host: String = server.url, flushIntervalMs: Int = 60000, storeWrite: ((ByteArray, File) -> Unit)? = null,
         clock: () -> Long = System::currentTimeMillis, retries: Int = 0, maxQueueSize: Int = 10_000,
-        onError: ((BatchFailure) -> Unit)? = null,
-    ) = configureJvm(Configuration("Basic push-fixture==", host = host, batchSize = 100, flushIntervalMs = flushIntervalMs,
-        retries = retries, baseDelay = 10, storageNamespace = "opt-out", storageDirectory = root, maxQueueSize = maxQueueSize,
-        onError = onError), storeWrite = storeWrite, platform = JvmPlatform(clock = clock))
+        onError: ((BatchFailure) -> Unit)? = null, sleeper: ManualSleeper? = null, gated: Boolean = true,
+    ): TranthorSDK {
+        val created = java.util.concurrent.atomic.AtomicReference<TranthorSDK?>()
+        val opened = java.util.concurrent.atomic.AtomicBoolean(false)
+        val gate: (suspend (Double) -> Unit)? = if (!gated || sleeper != null) null else { ms ->
+            if (ms == flushIntervalMs.toDouble()) {
+                while (!opened.get()) { if (created.get()?.isOptedOut == true) opened.set(true) else delay(1) }
+            }
+            sleepMilliseconds(ms)
+        }
+        return configureJvm(Configuration("Basic push-fixture==", host = host, batchSize = 100, flushIntervalMs = flushIntervalMs,
+            retries = retries, baseDelay = 10, storageNamespace = "opt-out", storageDirectory = root, maxQueueSize = maxQueueSize,
+            onError = onError), storeWrite = storeWrite, sleeper = sleeper, sleep = gate, platform = JvmPlatform(clock = clock))
+            .also { created.set(it) }
+    }
 
     /** Every event that reached the server with a 2xx or not, in arrival order. */
     private fun sent(): List<Map<String, JsonValue>> = requests.flatMap { request ->
@@ -122,13 +141,18 @@ class OptOutRemovalTest {
 
     @Test fun optingBackInMakesOneNewCycleThatSendsTheRemovalFirstAndRegistersStrictlyLater() = runBlocking {
         status = 503
-        val sdk = sdk(flushIntervalMs = 100)
+        // The flush interval never elapses (nothing releases the sleeper), so the queued identify and registration cannot
+        // be sent by a timer before optOut() on a slow machine: only the opt-out removal is ever the first request.
+        val sleeper = ManualSleeper()
+        val sdk = sdk(flushIntervalMs = 100, sleeper = sleeper)
         sdk.identify("user-1")
         sdk.registerInstallation("fcm-token-1", "com.example.shop", InstallationPermission.GRANTED)
         sdk.optOut()
         waitUntil { requests.size >= 1 }
         status = 204
-        delay(300) // Several intervals: an exhausted cycle waits for a trigger.
+        waitUntil { !sdk.deliveryCycleActive() } // the exhausted cycle has ended
+        // An exhausted cycle waits for a trigger: it arms no timer and starts no cycle.
+        assertNull(sdk.pendingTimer())
         assertEquals(1, requests.size)
         sdk.optIn()
         waitUntil { sent().any { it.event() == "Installation Registered" } }

@@ -149,9 +149,10 @@ internal suspend fun configureJvm(
     storeDelete: ((File) -> Unit)? = null,
     platform: Platform = JvmPlatform(),
     identityTimings: IdentityTimings = IdentityTimings(),
+    sleep: (suspend (Double) -> Unit)? = null,
 ): TranthorSDK = TranthorSDK.create(
     configuration, platform, transport,
-    sleep = if (sleeper != null) { ms -> sleeper.sleep(ms) } else ::sleepMilliseconds,
+    sleep = sleep ?: if (sleeper != null) { ms -> sleeper.sleep(ms) } else ::sleepMilliseconds,
     storeWrite = storeWrite, storeMove = storeMove, storeRead = storeRead, storeDelete = storeDelete,
     identityTimings = identityTimings,
 )
