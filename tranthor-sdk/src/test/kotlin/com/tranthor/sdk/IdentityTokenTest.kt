@@ -412,6 +412,24 @@ class IdentityTokenTest {
         assertEquals("the held event is still queued", listOf("u1"), savedEvents(root, "split").map { it["userId"]?.stringValue })
     }
 
+    @Test fun aFailureOfTheRemainderStillHoldsTheRefusedUsersEvents() = runBlocking {
+        val sleeper = ManualSleeper()
+        // u1 is refused (no token); the rest of the batch (u2) is then refused for good, which must not release u1's events.
+        respond = { _, request ->
+            val first = JsonValue.parse(request.body.toString(Charsets.UTF_8))["batch"]!!.arrayValue!!.map { it["userId"]?.stringValue }
+            if ("u1" in first) refusal(listOf("u1")) else MiniHttpServer.Response(400)
+        }
+        val sdk = sdk(batchSize = 2, sleeper = sleeper, namespace = "remainder-fails")
+        sdk.identify("u2", identityToken = valid("u2"))
+        sdk.identify("u1")
+        assertThrows(DeliveryFailure::class.java) { runBlocking { sdk.flush() } }
+        delay(300)
+        assertEquals("u1's events were not sent without a token", listOf(listOf("u2", "u1"), listOf("u2")), requests.indices.map { users(it) })
+        sleeper.wait(60_000.0) // the hold is running
+        assertEquals(listOf("u1"), savedEvents(root, "remainder-fails").map { it["userId"]?.stringValue })
+        sdk.shutdown()
+    }
+
     @Test fun anAppThatNeverIdentifiesKeepsItsFirstUserAsCurrentAfterARestart() = runBlocking {
         val renewed = valid("u1", "renewed")
         val first = sdk(namespace = "never-identifies")

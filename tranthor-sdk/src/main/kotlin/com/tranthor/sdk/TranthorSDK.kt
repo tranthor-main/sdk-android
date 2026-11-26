@@ -889,7 +889,7 @@ public class TranthorSDK private constructor(
                     return Outcome(false, null, sends, Hold(timings.providerBackoffMs, refusalFailure(failure)))
                 } else if (!inUse && current.none(::isInstallationRemoval)) {
                     // Identity was never used: the old behaviour for the whole batch.
-                    return Outcome(false, failure, sends)
+                    return Outcome(false, failure, sends, pendingHold)
                 } else {
                     for (user in refused) state.tokens.delete(user)
                     persistDeliveryState()
@@ -934,11 +934,12 @@ public class TranthorSDK private constructor(
                 val ms = if (failure.retryAfterGiven) failure.heldAfterMs.toLong().coerceIn(UNAVAILABLE_HOLD_MIN_MS, UNAVAILABLE_HOLD_MAX_MS)
                 else UNAVAILABLE_HOLD_DEFAULT_MS
                 notice(NoticeKind.IDENTITY_UNAVAILABLE, "The server could not read its identity settings; delivery is held for ${ms / 1000} s and nothing is dropped.")
-                return Outcome(false, null, sends, Hold(ms, failure))
+                // A hold set aside for the current user's missing token outlasts the server's delay if it is longer.
+                return Outcome(false, null, sends, Hold(maxOf(ms, pendingHold?.ms ?: 0L), failure))
             }
             // A background window makes one attempt and never sleeps through a retry.
             if (backgroundToken != null && retryable) { paused = true; break }
-            if (retry >= configuration.retries || !retryable) return Outcome(false, failure, sends)
+            if (retry >= configuration.retries || !retryable) return Outcome(false, failure, sends, pendingHold)
             val delayMs = retryDelay(configuration.baseDelay, retry, failure.retryAfterMs)
             val pending = scope.launch { sleep(delayMs) }
             backoff = pending
@@ -953,7 +954,7 @@ public class TranthorSDK private constructor(
             backoff = null
             retry++
         }
-        return Outcome(false, null, 0)
+        return Outcome(false, null, 0, pendingHold)
     }
 
     private fun reasonSuffix(reason: String?): String = reason?.let { " (reason: $it)" } ?: ""
