@@ -123,14 +123,14 @@ internal fun validateReferences(scenario: J) {
     }
     if (scenario["server"]?.get("identity") != null) needs("identity-token", "server.identity")
     if (scenario["config"]?.get("appId") != null) needs("app-id", "config.appId")
-    for (step in scenario["steps"]?.arrayValue ?: emptyList()) {
-        val spec = step["identityToken"] ?: continue
-        needs("identity-token", "emit identityToken")
-        require(step["method"]?.stringValue == "identify" && step["data"]?.get("userId")?.stringValue != null, "identityToken belongs on an identify with a userId")
-        define(spec["ref"]?.stringValue ?: "")
-    }
+    // Refs of the scripted provider exist from the start; an emit step's ref exists from that step on.
     for (step in scenario["steps"]?.arrayValue ?: emptyList()) {
         val op = step["op"]?.stringValue ?: ""
+        step["identityToken"]?.let { spec ->
+            needs("identity-token", "emit identityToken")
+            require(step["method"]?.stringValue == "identify" && step["data"]?.get("userId")?.stringValue != null, "identityToken belongs on an identify with a userId")
+            define(spec["ref"]?.stringValue ?: "")
+        }
         if (op == "anonymousId") require(linking, "anonymousId step must require identity-link")
         (step["call"]?.stringValue ?: step["label"]?.stringValue)?.let { label ->
             require(labels[label] == null, "Duplicate label $label")

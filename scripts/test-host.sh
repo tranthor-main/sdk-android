@@ -1,7 +1,8 @@
 #!/bin/bash
 # JVM host conformance: the real SDK (queue, HttpURLConnection, persistence) against the Node mock.
-# Expected: 0 failed, and the lifecycle scenario skipped (a plain JVM has no ProcessLifecycleOwner), plus the scenarios that
-# durable-queue supersedes.
+# Expected on suite 1.5.0: 64 validated, 60 passed, 0 failed, 4 skipped. The skips are lifecycle-background-flush (a plain JVM has no
+# ProcessLifecycleOwner) and the three scenarios that durable-queue supersedes: retries-exhausted,
+# interval-after-retries-exhausted and retry-dropped-connection-exhausted.
 source "$(dirname "$0")/lib.sh"
 cd "$ROOT"
 trap mock_stop EXIT INT TERM

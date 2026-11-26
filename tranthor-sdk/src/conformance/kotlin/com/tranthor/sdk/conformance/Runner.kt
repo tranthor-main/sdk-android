@@ -138,7 +138,8 @@ internal class ScenarioRunner(
     private val anonymousIdRefs = HashMap<String, String>()
     private var offset = 0.0
     // Identity tokens are minted by the mock at the moment they are needed, so their expiry is relative to now.
-    private val tokens = HashMap<String, String>()
+    // Written from the SDK's provider thread (mint) and read from the runner's: concurrent.
+    private val tokens = java.util.concurrent.ConcurrentHashMap<String, String>()
     private val providerCalls = ArrayList<String>()
     // The scripted provider belongs to the scenario, not to the SDK instance, so a restart keeps its position.
     private val providerScript = ArrayDeque(scenario["config"]?.get("identity")?.get("provider")?.arrayValue ?: emptyList())
@@ -214,7 +215,8 @@ internal class ScenarioRunner(
             storageDirectory = directory,
             onError = { log.append(it) },
             onNotice = { notices.append(it) },
-            identityTokenProvider = if (config["identity"] != null) ::scriptedProvider else null,
+            // The presence of `config.identity.provider` means the adapter configures a provider; timings alone do not.
+            identityTokenProvider = if (config["identity"]?.get("provider") != null) ::scriptedProvider else null,
             appId = config["appId"]?.stringValue,
         ), IdentityTimings(
             providerTimeoutMs = config["identity"]?.get("providerTimeoutMs")?.numberValue?.toLong() ?: 20_000,
@@ -383,12 +385,16 @@ internal class ScenarioRunner(
                 wire[label] = actual
             }
         }
-        for (error in callbacks) for (event in error.events) {
-            val text = JsonValue.ObjectValue(event).toJson()
-            for (token in tokens.values) require(!text.contains(token), "An identity token is inside an error event")
+        for (error in callbacks) {
+            val report = error.error.toString()
+            for (token in tokens.values) {
+                require(!report.contains(token), "An identity token is inside an error report")
+                for (event in error.events) require(!JsonValue.ObjectValue(event).toJson().contains(token), "An identity token is inside an error event")
+            }
         }
         for (notice in notices.snapshot()) {
-            for (token in tokens.values) require(!notice.message.contains(token), "An identity token is inside a notice")
+            val report = notice.message + (notice.reason ?: "")
+            for (token in tokens.values) require(!report.contains(token), "An identity token is inside a notice")
         }
         expect["notices"]?.arrayValue?.let { wanted ->
             // Notices are not errors: an ordered list of { kind, count?, reason? }, each listed field compared.

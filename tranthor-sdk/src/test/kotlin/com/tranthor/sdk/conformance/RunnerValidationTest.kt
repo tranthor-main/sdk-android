@@ -135,6 +135,12 @@ class RunnerValidationTest {
         val unknown = j("""{"id":"d","capabilities":["core","identity-token"],"steps":[{"op":"emit","call":"a","method":"track","data":{"userId":"u"}},
             {"op":"assert","expect":{"requests":[{"batch":[{"call":"a"}],"identityTokens":["never-defined"]}],"errors":[]}}]}""")
         assertThrows(CheckFailure::class.java) { validateReferences(unknown) }
+        // A request may name only a ref that an earlier step defined.
+        val later = j("""{"id":"d","capabilities":["core","identity-token"],"steps":[
+            {"op":"emit","call":"a","method":"track","data":{"userId":"u"}},
+            {"op":"assert","expect":{"requests":[{"batch":[{"call":"a"}],"identityTokens":["t"]}],"errors":[]}},
+            {"op":"emit","call":"b","method":"identify","data":{"userId":"u"},"identityToken":{"ref":"t","sub":"u","ttlSeconds":1}}]}""")
+        assertThrows(CheckFailure::class.java) { validateReferences(later) }
         val tokenOnTrack = j("""{"id":"d","capabilities":["core","identity-token"],"steps":[{"op":"emit","call":"a","method":"track","data":{"userId":"u"},"identityToken":{"ref":"t","sub":"u","ttlSeconds":1}}]}""")
         assertThrows(CheckFailure::class.java) { validateReferences(tokenOnTrack) }
     }
