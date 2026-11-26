@@ -9,14 +9,14 @@ All notable changes to this project are documented here. The format follows
 ### Added
 
 - Identity verification. `identify(userId, identityToken = …)` and `Configuration.identityTokenProvider` (Java: `Builder.identityTokenSupplier`) send a customer-signed identity token with each batch, for its own user, renewed through the provider before it expires. Tokens are saved in the state file. Details are in the README.
-- `onNotice` reports events the server dropped or could not verify (read from the `x-tranthor-dropped-events` and `x-tranthor-unverified-events` response headers, once per response), an identity token the server refused, and unavailable identity settings.
-- `DeliveryFailure.code`, the server's error code for a 403 or 503.
+- `onNotice` reports events the server dropped or could not verify (once per response), an identity token the server refused, and unavailable identity settings.
+- `DeliveryFailure.code`, the server's error code for a refusal, when it sends one.
 
 ### Changed
 
-- `x-tranthor-app-id` is now sent on every request: the application's package name, or `Configuration.appId` when you set it. An `appId` that cannot be an HTTP header value (empty, spaces at either end, a newline, non-ASCII) makes `configure` throw `InvalidAppId`; the SDK never sends an id you did not choose.
-- When identity is in use (a provider is set, or an identity token was ever passed to `identify`), a `403 identity_not_verified` holds the current user's batch instead of dropping it, and a request carries at most 10 users. An app that never uses identity tokens keeps the old behaviour: the 403 is reported to `onError` and the batch dropped.
-- A `503 identity_settings_unavailable` or `identity_secrets_unavailable` is now held for `Retry-After` for every app, in use or not, because it is a server outage and never a reason to drop. It is not counted against `retries`.
+- The app ID is now sent with every request: the application's package name, or `Configuration.appId` when you set it. An `appId` that cannot be an HTTP header value (empty, spaces at either end, a newline, non-ASCII) makes `configure` throw `InvalidAppId`; the SDK never sends an id you did not choose.
+- When identity is in use (a provider is set, or an identity token was ever passed to `identify`), a refused token holds the current user's batch instead of dropping it. An app that never uses identity tokens keeps the old behaviour: the refusal is reported to `onError` and the batch dropped.
+- A batch is now held, for every app, in use or not, when the server cannot read its identity settings, because that is a server outage and never a reason to drop. It is tried again after the delay the server asks for and is not counted against `retries`.
 - An `Installation Removed` (opt-out or sign-out) is never dropped for lack of a valid token: if the server refuses it and one renewal does not help, it stays, is retried every 60 seconds and at the next launch, and each failed attempt is reported to `onError`.
 - `TranthorSDK.identify` has a new last parameter, `identityToken`. Binary compatibility is kept for it: the old compiled signature and its default-argument bridge stay as a hidden deprecated overload, so code compiled against 0.2.x still links. `Configuration` gained three trailing parameters; the 11-argument constructor Java uses is unchanged, but Kotlin code compiled against 0.2.x that relies on default arguments must be recompiled (it needs no source change), because a hidden overload for that constructor would clash with the one Java uses. This is accepted before 1.0.
 

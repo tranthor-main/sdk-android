@@ -56,7 +56,7 @@ To clean up, delete/erase the disposable user (including associated events where
 ## Automated local checks
 
 ```sh
-scripts/test-emulator.sh             # instrumented conformance, 61 scenarios (suite 1.4.1)
+scripts/test-emulator.sh             # instrumented conformance, 64 scenarios
 scripts/test-emulator.sh --example   # plus the example UI tests (Track/Flush, push previews, Home flush)
 ```
 
