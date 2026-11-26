@@ -11,7 +11,7 @@ import java.io.File
  * invalid HTTP(S) URL makes [TranthorSDK.configure] throw.
  * @property identityTokenProvider supplies and renews identity tokens, see [TranthorSDK.identify]. It receives a
  * user id and returns that user's token, or null when there is none. It is called off the SDK's own executor and
- * the SDK waits at most 20 seconds for it, so a slow or failing provider never keeps events back.
+ * the SDK waits at most 20 seconds for it, so a slow or failing provider delays a send by at most 20 seconds and never keeps events back.
  * @property onNotice receives diagnostics that are not delivery failures, see [Notice]. It runs on the SDK's serial
  * executor: return promptly.
  * @property appId sent as `x-tranthor-app-id` on every request. Null (the default) sends the application's
@@ -141,11 +141,11 @@ public fun interface NoticeListener {
 
 /** What a [Notice] is about. */
 public enum class NoticeKind {
-    /** The server answered 2xx but dropped events it could not attribute to a verified user (identity Required). */
+    /** The server accepted the request but dropped events: anonymous or unattributed ones when identity is required, and oversized ones in every mode. */
     EVENTS_DROPPED,
     /** The server accepted events it could not verify; with identity Required it would have refused them (identity Monitor). */
     EVENTS_UNVERIFIED,
-    /** The server refused an identity token and the SDK could not fix it by renewing; delivery is held or retried. */
+    /** The server refused an identity token the SDK could not fix by renewing, or refused events with no user to renew a token for; delivery is held or retried. */
     IDENTITY_REFUSED,
     /** The server could not read its identity settings; the batch is held, not dropped. */
     IDENTITY_UNAVAILABLE,
