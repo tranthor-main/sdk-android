@@ -962,13 +962,15 @@ public class TranthorSDK private constructor(
                     pendingHold = hold
                     continue
                 }
-            } else if (!removals && failure.status == 503 && failure.code in IDENTITY_UNAVAILABLE_CODES) {
-                // The server could not read its identity settings. Nothing is wrong with the batch: keep it for Retry-After.
+            } else if (failure.status == 503 && failure.code in IDENTITY_UNAVAILABLE_CODES) {
+                // The server could not read its identity settings. Nothing is wrong with the batch or the removals: keep them for Retry-After.
                 val ms = if (failure.retryAfterGiven) failure.heldAfterMs.toLong().coerceIn(UNAVAILABLE_HOLD_MIN_MS, UNAVAILABLE_HOLD_MAX_MS)
                 else UNAVAILABLE_HOLD_DEFAULT_MS
                 // A hold set aside for the current user's missing token outlasts the server's delay if it is longer.
                 val applied = maxOf(ms, pendingHold?.ms ?: 0L)
-                notice(NoticeKind.IDENTITY_UNAVAILABLE, "The server could not read its identity settings; delivery is held for ${applied / 1000} s and nothing is dropped.")
+                notice(NoticeKind.IDENTITY_UNAVAILABLE,
+                    if (removals) "The server could not read its identity settings; a push removal stays queued and is tried again after ${applied / 1000} s. Nothing is dropped."
+                    else "The server could not read its identity settings; delivery is held for ${applied / 1000} s and nothing is dropped.")
                 return Outcome(false, null, sends, Hold(applied, failure))
             }
             // A background window makes one attempt and never sleeps through a retry.
@@ -1012,10 +1014,11 @@ public class TranthorSDK private constructor(
             val outcome = sendWithRetries(cycleScope, job, removals = true)
             val hold = outcome.hold
             if (hold != null) {
-                // Refused and one renewal did not fix it: the removal stays (the phone must stop receiving push), each failed
-                // attempt is a notice (nothing was dropped, so it is not an error), and it is retried on the hold timer
-                // and at the next launch.
-                noticeRemovalParked(hold)
+                // Refused and one renewal did not fix it, or the server could not read its identity settings: the removal stays
+                // (the phone must stop receiving push), each failed attempt is a notice (nothing was dropped, so it is not an
+                // error), and it is retried on the hold timer and at the next launch.
+                // An outage of the identity settings has already been noticed where the hold was made.
+                if (hold.failure.code !in IDENTITY_UNAVAILABLE_CODES) noticeRemovalParked(hold)
                 removalParked = hold.failure
                 failWaiters(hold.failure)
                 startRemovalRetry(hold.ms)
