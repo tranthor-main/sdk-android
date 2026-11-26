@@ -66,8 +66,10 @@ public class TranthorSDK private constructor(
     private var sentInstallation: List<String>? = null
     private var installationClockMs = Long.MIN_VALUE
     /**
-     * The retryable failure that exhausted the opt-out removals' attempt cycle, or null. While set, nothing
-     * is sent and no timer runs; only app start, foreground, optIn() and optOut() start one new cycle.
+     * The failure that parked the opt-out removals, or null. While set, nothing is sent until a new cycle starts. After an
+     * offline or server failure that exhausted the retries no timer runs, and only app start, foreground, optIn() and optOut()
+     * start one; after an identity refusal or an outage of the identity settings the removal timer ([startRemovalRetry]) starts
+     * it too.
      */
     private var removalParked: DeliveryFailure? = null
     /** Counts triggers, so one that arrives while a cycle runs still gets a cycle of its own after it. */
