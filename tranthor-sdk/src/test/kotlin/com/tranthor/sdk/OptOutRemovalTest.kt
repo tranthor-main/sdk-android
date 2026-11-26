@@ -37,6 +37,10 @@ class OptOutRemovalTest {
     ): TranthorSDK {
         val created = java.util.concurrent.atomic.AtomicReference<TranthorSDK?>()
         val opened = java.util.concurrent.atomic.AtomicBoolean(false)
+        // The interval is told apart from the SDK's other waits (retry backoff doubles from `baseDelay` 10 ms) by its length, so the
+        // two must differ; the hold and pause timers are far longer.
+        val backoffs = (0..retries).map { 10.0 * Math.pow(2.0, it.toDouble()) }
+        require(flushIntervalMs.toDouble() !in backoffs) { "The flush interval must differ from the retry backoff lengths $backoffs" }
         val gate: (suspend (Double) -> Unit)? = if (!gated || sleeper != null) null else { ms ->
             if (ms == flushIntervalMs.toDouble()) {
                 while (!opened.get()) { if (created.get()?.isOptedOut == true) opened.set(true) else delay(1) }
@@ -536,11 +540,11 @@ class OptOutRemovalTest {
             "Installation Registered" to "fcm-token-2"), delivered)
     }
 
-    @Test fun anOverflowWithNothingSupersededDropsTheOldestInstallationEvent() = runBlocking {
+    @Test fun anOverflowWithNothingSupersededNeverDropsARemoval() = runBlocking {
         val (dropped, delivered) = installationOnlyOverflow(maxQueueSize = 1)
-        assertEquals(listOf("Installation Registered(<redacted>)", "Installation Removed(<redacted>)",
-            "Installation Registered(<redacted>)"), dropped)
-        assertEquals(listOf("Installation Removed" to "fcm-token-1", "Installation Registered" to "fcm-token-2"), delivered)
+        // A removal is never the event a trim drops: only older registrations go, and the newest registration stays.
+        assertEquals(listOf("Installation Registered(<redacted>)", "Installation Registered(<redacted>)"), dropped)
+        assertEquals(listOf("Installation Removed" to "fcm-token-1", "Installation Removed" to "fcm-token-1", "Installation Registered" to "fcm-token-2"), delivered)
     }
 
     /** A process start over a parked removal; [holdStartRequest] keeps the start cycle's request in flight. */

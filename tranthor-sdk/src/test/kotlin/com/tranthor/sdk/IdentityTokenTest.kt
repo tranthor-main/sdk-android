@@ -912,12 +912,108 @@ class IdentityTokenTest {
 
     // ---- the held queue, the restored timer and the notice ----
 
-    @Test fun aMisTypedCurrentUserMarkerTakesTheDamagePathNotTheDefault() {
+    @Test fun aMisTypedCurrentUserMarkerCostsOnlyTheMarker() {
         val id = java.util.UUID.randomUUID()
-        assertThrows(IllegalArgumentException::class.java) { StoredState.decode("""{"version":2,"anonymousId":"$id","currentUserFrom":"soon"}""".toByteArray()) }
-        assertThrows(IllegalArgumentException::class.java) { StoredState.decode("""{"version":2,"anonymousId":"$id","currentUserFrom":-3}""".toByteArray()) }
+        val removal = """{"type":"track","event":"Installation Removed","messageId":"m1","timestamp":"2026-11-26T10:00:00.000Z","userId":"u1","properties":{"platform":"android","appId":"com.example","token":"t"}}"""
+        for (bad in listOf("\"soon\"", "-3", "1.5", "[]")) {
+            val state = StoredState.decode("""{"version":2,"anonymousId":"$id","userId":"u1","identityTokenSupplied":true,"installation":{"token":"t","appId":"com.example","permissionState":"granted"},"pendingRemovals":[$removal],"currentUserFrom":$bad}""".toByteArray())
+            assertTrue("$bad: the marker is unknown", state.currentUserFromUnknown)
+            assertEquals("$bad: the pending removal survives", 1, state.pendingRemovals.size)
+            assertEquals("$bad: so does the push registration", "t", state.installation?.token)
+            assertTrue(state.identityTokenSupplied)
+        }
         assertEquals(7L, StoredState.decode("""{"version":2,"anonymousId":"$id","currentUserFrom":7}""".toByteArray()).currentUserFrom)
         assertEquals(0L, StoredState.decode("""{"version":2,"anonymousId":"$id"}""".toByteArray()).currentUserFrom)
+        assertFalse(StoredState.decode("""{"version":2,"anonymousId":"$id"}""".toByteArray()).currentUserFromUnknown)
+    }
+
+    @Test fun aPendingRemovalSurvivesAMistypedMarkerAndAFormerUserDoesNotBecomeCurrent() = runBlocking {
+        val first = sdk(namespace = "mistyped-marker")
+        first.identify("u1", identityToken = valid("u1"))
+        first.track("queued before sign-out")
+        first.reset()
+        first.shutdown()
+        val file = stateFile("mistyped-marker")
+        val state = JsonValue.parse(file.readText()).objectValue!!.toMutableMap()
+        state["currentUserFrom"] = JsonValue.StringValue("soon")
+        state["installation"] = jsonObjectOf("token" to "fcm-token-1", "appId" to "com.example", "permissionState" to "granted").let { JsonValue.ObjectValue(it) }
+        state["pendingRemovals"] = JsonValue.ArrayValue(listOf(JsonValue.ObjectValue(jsonObjectOf("type" to "track", "event" to "Installation Removed",
+            "messageId" to "pending-removal", "timestamp" to "2026-11-26T10:00:00.000Z", "userId" to "u1",
+            "properties" to mapOf("platform" to "android", "appId" to "com.example", "token" to "fcm-token-1")))))
+        file.writeText(JsonValue.ObjectValue(state).toJson())
+        requests.clear()
+        respond = { _, request ->
+            if ("Installation Removed" in request.body.toString(Charsets.UTF_8)) MiniHttpServer.Response(204) else refusal(listOf("u1"))
+        }
+        val second = sdk(provider = { null }, namespace = "mistyped-marker", sleeper = ManualSleeper())
+        waitUntil { requests.any { "pending-removal" in it.body.toString(Charsets.UTF_8) } } // the removal is delivered
+        waitUntil { stored("mistyped-marker").pendingRemovals.isEmpty() }
+        runCatching { second.flush() }
+        waitUntil { errors.snapshot().isNotEmpty() }
+        assertTrue("the signed-out user's events were dropped and reported, not held", savedEvents(root, "mistyped-marker").isEmpty())
+        second.shutdown()
+    }
+
+    private fun installationItem(event: String, token: String) = QueueItem.of(jsonObjectOf("type" to "track", "event" to event, "userId" to "u1",
+        "messageId" to java.util.UUID.randomUUID().toString(), "properties" to mapOf("platform" to "android", "appId" to "com.example", "token" to token)))
+
+    @Test fun aTrimNeverDropsARemoval() {
+        // Only removals and the newest registration remain: nothing is dropped, so nothing is reported.
+        val onlyRemovals = ArrayDeque(listOf(installationItem("Installation Removed", "a"), installationItem("Installation Removed", "b"), installationItem("Installation Registered", "c")))
+        assertTrue(trimQueue(onlyRemovals, 1).isEmpty())
+        assertEquals(3, onlyRemovals.size)
+        // An older registration goes before anything else of the same kind, never a removal.
+        val registrations = ArrayDeque(listOf(installationItem("Installation Removed", "a"), installationItem("Installation Registered", "b"), installationItem("Installation Registered", "c")))
+        val dropped = trimQueue(registrations, 2)
+        assertEquals(listOf("Installation Registered"), dropped.map { it.value["event"]?.stringValue })
+        assertEquals(listOf("Installation Removed", "Installation Registered"), registrations.map { it.value["event"]?.stringValue })
+        // Ordinary events still go first, oldest first.
+        val mixed = ArrayDeque(listOf(installationItem("Installation Removed", "a"),
+            QueueItem.of(jsonObjectOf("type" to "track", "event" to "old", "messageId" to "1")), QueueItem.of(jsonObjectOf("type" to "track", "event" to "new", "messageId" to "2")),
+            installationItem("Installation Registered", "c")))
+        assertEquals(listOf("old", "new"), trimQueue(mixed, 2).map { it.value["event"]?.stringValue })
+    }
+
+    @Test fun aHoldDropsOrdinaryEventsOldestFirstAndKeepsEveryRemoval() = runBlocking {
+        respond = { _, _ -> refusal(listOf("u1")) }
+        val sleeper = ManualSleeper()
+        val sdk = sdk(provider = { awaitCancellation() }, sleeper = sleeper, namespace = "removals-survive-trim", batchSize = 1)
+        sdk.identify("u1")
+        val providerWait = sleeper.wait(20_000.0)
+        repeat(3) { sdk.track("Installation Removed", userId = "u1", properties = jsonObjectOf("platform" to "android", "appId" to "com.example", "token" to "t$it")) }
+        repeat(HELD_QUEUE_LIMIT + 50) { sdk.track("ordinary $it", userId = "u1") }
+        sleeper.release(providerWait)
+        waitUntil { errors.snapshot().sumOf { it.events.size } >= 50 }
+        val kept = savedEvents(root, "removals-survive-trim")
+        assertEquals(HELD_QUEUE_LIMIT, kept.size)
+        assertEquals("every removal survives", 3, kept.count { it["event"]?.stringValue == "Installation Removed" })
+        val reported = errors.snapshot().flatMap { it.events }.map { it["event"]?.stringValue }
+        assertTrue("only ordinary events were reported dropped", reported.none { it == "Installation Removed" })
+        assertEquals("the oldest ordinary events go first", "ordinary 0", reported.first())
+        sdk.shutdown()
+    }
+
+    @Test fun aRollbackThroughTheHoldLeavesTheQueueUntouched() = runBlocking {
+        respond = { _, _ -> refusal(listOf("u1")) }
+        val sleeper = ManualSleeper()
+        var failStateWrites = false
+        val sdk = configureJvm(Configuration("Basic k==", host = server.url, batchSize = 1, flushIntervalMs = 61_000, retries = 0, baseDelay = 10,
+            storageNamespace = "rollback-keeps-queue", storageDirectory = root, identityTokenProvider = { awaitCancellation() },
+            onError = { errors.append(it) }), sleeper = sleeper,
+            storeWrite = { bytes, file -> if (failStateWrites && file.name == "state.json") throw java.io.IOException("disk full"); TempRenameFileIo.write(file, bytes) })
+        sdk.identify("u1")
+        val providerWait = sleeper.wait(20_000.0)
+        repeat(HELD_QUEUE_LIMIT + 5) { sdk.track("e$it", userId = "u1") }
+        sleeper.release(providerWait)
+        waitUntil { errors.snapshot().sumOf { it.events.size } >= 5 }
+        val before = savedEvents(root, "rollback-keeps-queue")
+        val reportedBefore = errors.snapshot().sumOf { it.events.size }
+        failStateWrites = true
+        assertThrows(TranthorException.StoreTemporarilyUnavailable::class.java) { runBlocking { sdk.identify("u1", identityToken = valid("u1")) } }
+        failStateWrites = false
+        assertEquals("the queue is as it was", before, savedEvents(root, "rollback-keeps-queue"))
+        assertEquals("nothing more was dropped or reported", reportedBefore, errors.snapshot().sumOf { it.events.size })
+        sdk.shutdown()
     }
 
     @Test fun theMarkerAppliesToTheQueueOfAnAppThatStartsOptedOut() = runBlocking {

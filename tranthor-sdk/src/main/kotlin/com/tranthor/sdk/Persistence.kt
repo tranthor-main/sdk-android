@@ -38,6 +38,8 @@ internal class StoredState(
      */
     var currentUserFrom: Long = 0,
 ) {
+    /** Set by [decode] when the marker was present but unreadable: which queued events are the current user's is unknown. Not saved. */
+    var currentUserFromUnknown: Boolean = false
     /** Encodes identity, consent, the push installation and opt-out removals; queued events live in their own files. */
     fun encode(): ByteArray {
         val out = StringBuilder(256)
@@ -88,16 +90,19 @@ internal class StoredState(
                 is JsonValue.BooleanValue -> value.value
                 else -> throw IllegalArgumentException("Invalid consent field")
             }
+            val marker = currentUserFrom(root)
             return StoredState(anonymous, user, optedOut, installation(root["installation"]), pendingRemovals(root["pendingRemovals"]),
-                tokens(root["identityTokens"]), root["identityTokenSupplied"]?.booleanValue == true, currentUserFrom(root, strict = true))
+                tokens(root["identityTokens"]), root["identityTokenSupplied"]?.booleanValue == true, marker ?: 0L)
+                .also { it.currentUserFromUnknown = marker == null }
         }
 
-        /** Strict (decoding): a marker that is present but not a non-negative whole number is damage. Lenient (salvaging): it reads as 0. */
-        private fun currentUserFrom(root: Map<String, JsonValue>, strict: Boolean): Long {
+        /**
+         * The marker: 0 when absent, null when present but not a non-negative whole number. A bad marker costs only the marker:
+         * the rest of the state (pending removals, the push registration) is kept and the caller treats the queue as unknown.
+         */
+        private fun currentUserFrom(root: Map<String, JsonValue>): Long? {
             val value = root["currentUserFrom"] ?: return 0L
-            val number = value.numberValue?.takeIf { it.isFinite() && it >= 0 && it < 9.0e15 && it == Math.floor(it) }
-            if (number == null && strict) throw IllegalArgumentException("Invalid current user marker")
-            return number?.toLong() ?: 0L
+            return value.numberValue?.takeIf { it.isFinite() && it >= 0 && it < 9.0e15 && it == Math.floor(it) }?.toLong()
         }
 
         /** A damaged entry is dropped, not treated as state damage: the provider supplies the token again. */
@@ -137,7 +142,7 @@ internal class StoredState(
             result.userId = root["userId"]?.stringValue
             // Identity stays in use: without the flag a refusal would drop a batch the app expects to be held.
             result.identityTokenSupplied = root["identityTokenSupplied"]?.booleanValue == true
-            result.currentUserFrom = currentUserFrom(root, strict = false)
+            result.currentUserFrom = currentUserFrom(root) ?: 0L
             return result
         }
 

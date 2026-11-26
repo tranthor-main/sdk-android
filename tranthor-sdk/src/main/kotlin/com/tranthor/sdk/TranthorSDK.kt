@@ -262,7 +262,7 @@ public class TranthorSDK private constructor(
             state.identityTokenSupplied = suppliedBefore
             restoreParkedRemovals(removalsBefore, parkedBefore)
             // The hold it ended is back: nothing about the batch changed.
-            if (endedHold && holdBefore != null) startHold(holdBefore)
+            if (endedHold && holdBefore != null) startHold(holdBefore, trim = false)
             throw error
         } finally {
             publish()
@@ -391,7 +391,7 @@ public class TranthorSDK private constructor(
             }
         }
         // While a batch is held the queue stays small: the oldest events go, and are reported, beyond the limit.
-        val removed = store.queue.trim(maxOf(0, configuration.maxQueueSize - store.queue.activeCount).let { if (held) minOf(it, HELD_QUEUE_LIMIT) else it })
+        val removed = store.queue.trim(queueCapacity())
         reportDropped(removed.map { it.value })
         if (store.queue.queuedCount >= configuration.batchSize) beginCycle() else armTimer()
     }
@@ -741,11 +741,21 @@ public class TranthorSDK private constructor(
         holdTimer?.cancel(); holdTimer = null
     }
 
-    private fun startHold(hold: Hold) {
+    /**
+     * How many events may wait in the queue behind the active batch: `maxQueueSize` in all, and at most [HELD_QUEUE_LIMIT] in all
+     * (waiting plus active) while a hold is active.
+     */
+    private fun queueCapacity(): Int {
+        val limit = if (held) minOf(configuration.maxQueueSize, HELD_QUEUE_LIMIT) else configuration.maxQueueSize
+        return maxOf(0, limit - store.queue.activeCount)
+    }
+
+    /** Starts a hold; [trim] is false when a failed write puts back a hold that already existed, which changes nothing. */
+    private fun startHold(hold: Hold, trim: Boolean = true) {
         held = true
         currentHold = hold
         // The limit applies as the hold begins, not only when the next event is admitted.
-        reportDropped(store.queue.trim(maxOf(0, HELD_QUEUE_LIMIT - store.queue.activeCount)).map { it.value })
+        if (trim) reportDropped(store.queue.trim(queueCapacity()).map { it.value })
         holdTimer?.cancel()
         holdTimer = scope.launch {
             try { sleep(hold.ms.toDouble()) } catch (_: CancellationException) { return@launch }
@@ -1222,10 +1232,10 @@ public class TranthorSDK private constructor(
                         store.queue.numberFrom(restored.currentUserFrom) // the marker still applies after an opt-in
                     } else {
                         store.queue.load(store.legacyEvents, restored.currentUserFrom)
-                        // Only the identity survived a damaged state file: whose the queued events are is unknown, so they all count
-                        // as a signed-out user's, which is safe: they are never held against the next user.
-                        if (store.stateWasDamaged) restored.currentUserFrom = store.queue.nextSequenceNumber
                     }
+                    // Only the identity survived a damaged state file, or the marker alone was unreadable: whose the queued events
+                    // are is unknown, so they all count as a signed-out user's, which is safe: they are never held against the next user.
+                    if (store.stateWasDamaged || restored.currentUserFromUnknown) restored.currentUserFrom = store.queue.nextSequenceNumber
                     // Before the first save below, which would hide that the opt-out was interrupted.
                     if (store.interruptedOptOut) restored.installation?.takeIf { restored.userId != null }?.let {
                         restored.pendingRemovals.add(optOutRemoval(restored, it, timestamp(platform.currentTimeMs())))

@@ -81,20 +81,31 @@ internal fun withoutToken(event: Map<String, JsonValue>): Map<String, JsonValue>
 /**
  * Removes events until [queue] fits [capacity] and returns them. Ordinary events go first, oldest first: a
  * queued `Installation Registered` or `Installation Removed` is never dropped for an ordinary one.
- * When only Installation events are left, the oldest one that a newer event for the same token supersedes goes,
- * so the newest per token is kept; with none superseded, the oldest goes.
+ * When only Installation events are left, an `Installation Registered` goes (see [droppableRegistration]); an
+ * `Installation Removed` never does, so the queue may stay above [capacity] and nothing is returned for it.
  */
 internal fun trimQueue(queue: ArrayDeque<QueueItem>, capacity: Int): List<QueueItem> {
     val removed = ArrayList<QueueItem>()
     while (queue.size > capacity) {
         val ordinary = queue.indexOfFirst { installationTarget(it) == null }
-        val index = if (ordinary >= 0) ordinary else queue.indices.firstOrNull { index ->
-            val target = installationTarget(queue[index])
-            (index + 1 until queue.size).any { installationTarget(queue[it]) == target }
-        } ?: 0
+        val index = if (ordinary >= 0) ordinary else droppableRegistration(queue) ?: break
         removed.add(queue.removeAt(index))
     }
     return removed
+}
+
+/**
+ * With only Installation events left: the registration that goes, or null when none may. A removal is never dropped, so
+ * only registrations are candidates, and the newest registration always stays. A registration that a newer event for the
+ * same token supersedes goes first, else the oldest. With only removals and the newest registration left, nothing goes.
+ */
+private fun droppableRegistration(queue: ArrayDeque<QueueItem>): Int? {
+    val registrations = queue.indices.filter { queue[it].value["event"]?.stringValue == INSTALLATION_REGISTERED }
+    val candidates = registrations.dropLast(1)
+    return candidates.firstOrNull { index ->
+        val target = installationTarget(queue[index])
+        (index + 1 until queue.size).any { installationTarget(queue[it]) == target }
+    } ?: candidates.firstOrNull()
 }
 
 /** The (appId, token) of an Installation event, or null for an ordinary event. */
