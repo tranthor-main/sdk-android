@@ -664,25 +664,27 @@ class IdentityTokenTest {
         sdk.shutdown()
     }
 
-    @Test fun anOptOutRemovalThatCannotGetATokenIsParkedReportedAndRetriedOnTheHoldTimerUntilDelivered() = runBlocking {
+    @Test fun anOptOutRemovalThatCannotGetATokenIsParkedNoticedAndRetriedOnTheHoldTimerUntilDelivered() = runBlocking {
         val sleeper = ManualSleeper()
         val sdk = optedOutWithInstallation({ null }, "removal-parked", sleeper)
         respond = { index, _ -> if (index < 2) refusal(listOf("u1"), "missing") else MiniHttpServer.Response(204) }
         sdk.optOut()
-        waitUntil { errors.snapshot().size == 1 }
-        val failure = errors.snapshot().single()
-        assertEquals(403, failure.error.status)
-        assertEquals("Installation Removed", failure.events.single()["event"]?.stringValue)
-        assertFalse("the push token stays out of the callback", failure.events.toString().contains("fcm-token-1"))
+        waitUntil { notices.size == 1 }
+        // Nothing was dropped, so it is a notice (without the push token), never an error report.
+        assertEquals(NoticeKind.IDENTITY_REFUSED, notices.single().kind)
+        assertEquals("missing", notices.single().reason)
+        assertFalse("the push token stays out of the notice", notices.single().message.contains("fcm-token-1"))
+        assertTrue(errors.snapshot().isEmpty())
         assertEquals(1, requests.size)
         assertEquals("kept, not dropped", 1, stored("removal-parked").pendingRemovals.size)
         sleeper.release(sleeper.wait(60_000.0)) // the same 60 s hold timer as the other holds
-        waitUntil { errors.snapshot().size == 2 } // every failed attempt is reported
+        waitUntil { notices.size == 2 } // every failed attempt is reported
         assertEquals(2, requests.size)
         sleeper.release(sleeper.wait(60_000.0))
         waitUntil { requests.size == 3 }
         waitUntil { stored("removal-parked").pendingRemovals.isEmpty() }
-        assertEquals("delivered at last: nothing more is reported", 2, errors.snapshot().size)
+        assertEquals("delivered at last: nothing more is reported", 2, notices.size)
+        assertTrue(errors.snapshot().isEmpty())
         sdk.shutdown()
     }
 
@@ -691,7 +693,7 @@ class IdentityTokenTest {
         val sdk = optedOutWithInstallation({ null }, "removal-next-launch", sleeper)
         respond = { _, _ -> refusal(listOf("u1"), "missing") }
         sdk.optOut()
-        waitUntil { errors.snapshot().size == 1 }
+        waitUntil { notices.size == 1 }
         sdk.shutdown()
         respond = { _, _ -> MiniHttpServer.Response(204) }
         val next = sdk(provider = { null }, namespace = "removal-next-launch")
@@ -705,9 +707,31 @@ class IdentityTokenTest {
         val sdk = optedOutWithInstallation({ null }, "removal-superseded", sleeper)
         respond = { _, _ -> refusal(listOf("u1"), "missing") }
         sdk.optOut()
-        waitUntil { errors.snapshot().size == 1 }
+        waitUntil { notices.size == 1 }
         sdk.optIn() // registers the stored token to the same signed-in user again
         assertTrue("the registration supersedes the removal", stored("removal-superseded").pendingRemovals.isEmpty())
+        sdk.shutdown()
+    }
+
+    @Test fun whenIdentityWasNeverUsedARefusedBatchDropsTheOrdinaryEventsAndParksTheRemoval() = runBlocking {
+        val sleeper = ManualSleeper()
+        // No provider and no token ever: the old behaviour for ordinary events, but a removal is never dropped.
+        respond = { index, _ -> if (index == 0) refusal(listOf("u1")) else MiniHttpServer.Response(204) }
+        val sdk = sdk(sleeper = sleeper, namespace = "never-used-removal")
+        sdk.identify("u1")
+        sdk.track("Ordinary", userId = "u1")
+        sdk.track("Installation Removed", userId = "u1", properties = jsonObjectOf("platform" to "android", "appId" to "com.example", "token" to "fcm-token-1"))
+        assertThrows(DeliveryFailure::class.java) { runBlocking { sdk.flush() } }
+        waitUntil { errors.snapshot().isNotEmpty() }
+        assertEquals("the ordinary events are dropped and reported once", 1, errors.snapshot().size)
+        assertEquals(listOf("identify", "Ordinary"), errors.snapshot().single().events.map { it["event"]?.stringValue ?: it["type"]?.stringValue })
+        assertEquals("the removal stays queued", listOf("Installation Removed"), savedEventNames(root, "never-used-removal"))
+        assertEquals("and each failed attempt is a notice, not an error", NoticeKind.IDENTITY_REFUSED, notices.single().kind)
+        sleeper.release(sleeper.wait(60_000.0)) // the hold timer
+        waitUntil { requests.size == 2 }
+        assertEquals(listOf("Installation Removed"), body(1)["batch"]!!.arrayValue!!.map { it["event"]?.stringValue })
+        waitUntil { savedEvents(root, "never-used-removal").isEmpty() }
+        assertEquals(1, errors.snapshot().size)
         sdk.shutdown()
     }
 
@@ -718,9 +742,10 @@ class IdentityTokenTest {
         sdk.reset() // queues Installation Removed under u1; nobody is signed in now
         val failure = assertThrows(DeliveryFailure::class.java) { runBlocking { sdk.flush() } }
         assertEquals(403, failure.status)
-        waitUntil { errors.snapshot().size == 1 }
-        assertEquals("Installation Removed", errors.snapshot().single().events.single()["event"]?.stringValue)
-        assertFalse(errors.snapshot().single().events.toString().contains("fcm-token-1"))
+        waitUntil { notices.size == 1 }
+        assertEquals(NoticeKind.IDENTITY_REFUSED, notices.single().kind)
+        assertTrue("nothing was dropped, so nothing is reported as an error", errors.snapshot().isEmpty())
+        assertFalse(notices.single().message.contains("fcm-token-1"))
         assertEquals("kept in the queue", listOf("Installation Removed"), savedEventNames(root, "signout-removal"))
         sleeper.release(sleeper.wait(60_000.0))
         waitUntil { requests.size == 2 }
@@ -741,7 +766,7 @@ class IdentityTokenTest {
         var stateWrites = 0
         var failStateWrite = -1
         val sdk = configureJvm(Configuration("Basic k==", host = server.url, batchSize = 100, flushIntervalMs = 61_000, retries = 0, baseDelay = 10,
-            storageNamespace = "supersede-fails", storageDirectory = root, identityTokenProvider = { null }, onError = { errors.append(it) }),
+            storageNamespace = "supersede-fails", storageDirectory = root, identityTokenProvider = { null }, onError = { errors.append(it) }, onNotice = { notices.add(it) }),
             sleeper = sleeper, storeWrite = { bytes, file ->
                 if (file.name == "state.json" && ++stateWrites == failStateWrite) throw java.io.IOException("disk full")
                 TempRenameFileIo.write(file, bytes)
@@ -752,7 +777,7 @@ class IdentityTokenTest {
         requests.clear()
         respond = { _, _ -> refusal(listOf("u1"), "missing") }
         sdk.optOut()
-        waitUntil { errors.snapshot().size == 1 } // parked
+        waitUntil { notices.size == 1 } // parked
         val sent = requests.size
         val retryTimer = sleeper.wait(60_000.0) // the 60 s retry of the parked removal
         failStateWrite = stateWrites + 2 // optIn: consent and state first, then the state write that supersedes the removal

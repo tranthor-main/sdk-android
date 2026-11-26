@@ -490,8 +490,8 @@ public class TranthorSDK private constructor(
      * delivered even while opted out. It gets one attempt cycle; after a retryable failure it waits,
      * with no timer, for the next app start, return to the foreground, [optIn] or [optOut], each of
      * which makes one new cycle, until the server accepts or rejects it. A refused identity token never rejects it:
-     * after one renewal through the identity provider it stays, is retried every 60 seconds, and each failed attempt is
-     * reported to `onError` with the push token redacted.
+     * after one renewal through the identity provider it stays, is retried every 60 seconds, and each failed attempt
+     * calls `onNotice` (not `onError`, because nothing was dropped) without the push token.
      */
     public suspend fun optOut() {
         val outcome = withContext(dispatcher) {
@@ -854,6 +854,12 @@ public class TranthorSDK private constructor(
         notify(BatchFailure(refusalFailure(refusal), items.map { it.value }, attempts))
     }
 
+    /** Says that a push removal the server refused stays queued; the message carries no push token and no user id. */
+    private fun noticeRemovalParked(hold: Hold) {
+        val reason = hold.failure.reason
+        notice(NoticeKind.IDENTITY_REFUSED, "The server refused identity verification for a push removal. It is never dropped: it stays queued and is tried again after ${hold.ms / 1000} s" + reasonSuffix(reason) + ".", reason = reason)
+    }
+
     private fun refusalFailure(refusal: DeliveryFailure, detail: String? = null): DeliveryFailure =
         DeliveryFailure(403, detail ?: "identity not verified", code = IDENTITY_NOT_VERIFIED, reason = refusal.reason)
 
@@ -935,11 +941,10 @@ public class TranthorSDK private constructor(
                     // What stays: the current user's items waiting for a token, and every kept sign-out removal.
                     val kept = batch().filter { (holdCurrent && userIdOf(it) == currentUser) || isInstallationRemoval(it) && userIdOf(it) in refused }
                     if (kept.isEmpty()) continue
-                    // Each failed attempt for a previous user's removal is reported (its push token redacted), because it stays until
-                    // delivered; the current user's is a notice like any other held batch.
-                    val keptRemovals = kept.filter { isInstallationRemoval(it) && userIdOf(it) != currentUser }
-                    if (keptRemovals.isNotEmpty()) notify(BatchFailure(refusalFailure(failure), keptRemovals.map { it.value }, sends))
                     val hold = Hold(timings.providerBackoffMs, refusalFailure(failure))
+                    // Each failed attempt for a removal that stays is a notice (nothing was dropped); a hold for the current
+                    // user's missing token has just raised its own.
+                    if (!holdCurrent && kept.any(::isInstallationRemoval)) noticeRemovalParked(hold)
                     // The other users' events (and anonymous ones) in this batch go first, in one request; only the kept
                     // items wait. Events queued behind the held ones still wait for them: that limit is deliberate.
                     if (kept.size == batch().size || pendingHold != null) return Outcome(false, null, sends, hold)
@@ -998,8 +1003,9 @@ public class TranthorSDK private constructor(
             val hold = outcome.hold
             if (hold != null) {
                 // Refused and one renewal did not fix it: the removal stays (the phone must stop receiving push), each failed
-                // attempt is reported, and it is retried on the hold timer and at the next launch.
-                notify(BatchFailure(hold.failure, batch.map { it.value }, outcome.attempts))
+                // attempt is a notice (nothing was dropped, so it is not an error), and it is retried on the hold timer
+                // and at the next launch.
+                noticeRemovalParked(hold)
                 removalParked = hold.failure
                 failWaiters(hold.failure)
                 startRemovalRetry(hold.ms)
