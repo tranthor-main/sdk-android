@@ -24,14 +24,20 @@ public final class com/tranthor/sdk/Configuration {
 	public fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/Number;Ljava/lang/Number;Ljava/lang/Number;Ljava/lang/Number;ZLjava/lang/String;Ljava/io/File;)V
 	public fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/Number;Ljava/lang/Number;Ljava/lang/Number;Ljava/lang/Number;ZLjava/lang/String;Ljava/io/File;I)V
 	public fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/Number;Ljava/lang/Number;Ljava/lang/Number;Ljava/lang/Number;ZLjava/lang/String;Ljava/io/File;ILkotlin/jvm/functions/Function1;)V
-	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/Number;Ljava/lang/Number;Ljava/lang/Number;Ljava/lang/Number;ZLjava/lang/String;Ljava/io/File;ILkotlin/jvm/functions/Function1;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/Number;Ljava/lang/Number;Ljava/lang/Number;Ljava/lang/Number;ZLjava/lang/String;Ljava/io/File;ILkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function2;)V
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/Number;Ljava/lang/Number;Ljava/lang/Number;Ljava/lang/Number;ZLjava/lang/String;Ljava/io/File;ILkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function2;Ljava/lang/String;)V
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/Number;Ljava/lang/Number;Ljava/lang/Number;Ljava/lang/Number;ZLjava/lang/String;Ljava/io/File;ILkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function2;Ljava/lang/String;Lkotlin/jvm/functions/Function1;)V
+	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/Number;Ljava/lang/Number;Ljava/lang/Number;Ljava/lang/Number;ZLjava/lang/String;Ljava/io/File;ILkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function2;Ljava/lang/String;Lkotlin/jvm/functions/Function1;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun getAppId ()Ljava/lang/String;
 	public final fun getAutomaticContext ()Z
 	public final fun getBaseDelay ()D
 	public final fun getBatchSize ()I
 	public final fun getFlushIntervalMs ()I
 	public final fun getHost ()Ljava/lang/String;
+	public final fun getIdentityTokenProvider ()Lkotlin/jvm/functions/Function2;
 	public final fun getMaxQueueSize ()I
 	public final fun getOnError ()Lkotlin/jvm/functions/Function1;
+	public final fun getOnNotice ()Lkotlin/jvm/functions/Function1;
 	public final fun getRetries ()I
 	public final fun getStorageDirectory ()Ljava/io/File;
 	public final fun getStorageNamespace ()Ljava/lang/String;
@@ -41,14 +47,18 @@ public final class com/tranthor/sdk/Configuration {
 
 public final class com/tranthor/sdk/Configuration$Builder {
 	public fun <init> (Ljava/lang/String;)V
+	public final fun appId (Ljava/lang/String;)Lcom/tranthor/sdk/Configuration$Builder;
 	public final fun automaticContext (Z)Lcom/tranthor/sdk/Configuration$Builder;
 	public final fun baseDelay (Ljava/lang/Number;)Lcom/tranthor/sdk/Configuration$Builder;
 	public final fun batchSize (Ljava/lang/Number;)Lcom/tranthor/sdk/Configuration$Builder;
 	public final fun build ()Lcom/tranthor/sdk/Configuration;
 	public final fun flushIntervalMs (Ljava/lang/Number;)Lcom/tranthor/sdk/Configuration$Builder;
 	public final fun host (Ljava/lang/String;)Lcom/tranthor/sdk/Configuration$Builder;
+	public final fun identityTokenProvider (Lkotlin/jvm/functions/Function2;)Lcom/tranthor/sdk/Configuration$Builder;
+	public final fun identityTokenSupplier (Lcom/tranthor/sdk/IdentityTokenSupplier;)Lcom/tranthor/sdk/Configuration$Builder;
 	public final fun maxQueueSize (I)Lcom/tranthor/sdk/Configuration$Builder;
 	public final fun onError (Lcom/tranthor/sdk/BatchFailureListener;)Lcom/tranthor/sdk/Configuration$Builder;
+	public final fun onNotice (Lcom/tranthor/sdk/NoticeListener;)Lcom/tranthor/sdk/Configuration$Builder;
 	public final fun retries (Ljava/lang/Number;)Lcom/tranthor/sdk/Configuration$Builder;
 	public final fun storageDirectory (Ljava/io/File;)Lcom/tranthor/sdk/Configuration$Builder;
 	public final fun storageNamespace (Ljava/lang/String;)Lcom/tranthor/sdk/Configuration$Builder;
@@ -59,11 +69,16 @@ public final class com/tranthor/sdk/Configuration$Companion {
 
 public final class com/tranthor/sdk/DeliveryFailure : java/lang/Exception {
 	public fun equals (Ljava/lang/Object;)Z
+	public final fun getCode ()Ljava/lang/String;
 	public final fun getRetryAfterMs ()D
 	public final fun getRetryable ()Z
 	public final fun getStatus ()Ljava/lang/Integer;
 	public fun hashCode ()I
 	public fun toString ()Ljava/lang/String;
+}
+
+public abstract interface class com/tranthor/sdk/IdentityTokenSupplier {
+	public abstract fun tokenFor (Ljava/lang/String;)Ljava/lang/String;
 }
 
 public final class com/tranthor/sdk/InstallationPermission : java/lang/Enum {
@@ -163,6 +178,28 @@ public final class com/tranthor/sdk/JsonValueKt {
 	public static final fun jsonObjectOf ([Lkotlin/Pair;)Ljava/util/Map;
 }
 
+public final class com/tranthor/sdk/Notice {
+	public final fun getCount ()Ljava/lang/Integer;
+	public final fun getKind ()Lcom/tranthor/sdk/NoticeKind;
+	public final fun getMessage ()Ljava/lang/String;
+	public final fun getReason ()Ljava/lang/String;
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class com/tranthor/sdk/NoticeKind : java/lang/Enum {
+	public static final field EVENTS_DROPPED Lcom/tranthor/sdk/NoticeKind;
+	public static final field EVENTS_UNVERIFIED Lcom/tranthor/sdk/NoticeKind;
+	public static final field IDENTITY_REFUSED Lcom/tranthor/sdk/NoticeKind;
+	public static final field IDENTITY_UNAVAILABLE Lcom/tranthor/sdk/NoticeKind;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public static fun valueOf (Ljava/lang/String;)Lcom/tranthor/sdk/NoticeKind;
+	public static fun values ()[Lcom/tranthor/sdk/NoticeKind;
+}
+
+public abstract interface class com/tranthor/sdk/NoticeListener {
+	public abstract fun onNotice (Lcom/tranthor/sdk/Notice;)V
+}
+
 public abstract interface class com/tranthor/sdk/TranthorCallback {
 	public abstract fun onComplete (Ljava/lang/Object;Ljava/lang/Throwable;)V
 }
@@ -181,6 +218,9 @@ public final class com/tranthor/sdk/TranthorClient {
 	public final fun identify (Ljava/lang/String;Ljava/util/Map;)V
 	public final fun identify (Ljava/lang/String;Ljava/util/Map;Lcom/tranthor/sdk/TranthorCallback;)V
 	public static synthetic fun identify$default (Lcom/tranthor/sdk/TranthorClient;Ljava/lang/String;Ljava/util/Map;Lcom/tranthor/sdk/TranthorCallback;ILjava/lang/Object;)V
+	public final fun identifyWithIdentityToken (Ljava/lang/String;Ljava/util/Map;Ljava/lang/String;)V
+	public final fun identifyWithIdentityToken (Ljava/lang/String;Ljava/util/Map;Ljava/lang/String;Lcom/tranthor/sdk/TranthorCallback;)V
+	public static synthetic fun identifyWithIdentityToken$default (Lcom/tranthor/sdk/TranthorClient;Ljava/lang/String;Ljava/util/Map;Ljava/lang/String;Lcom/tranthor/sdk/TranthorCallback;ILjava/lang/Object;)V
 	public final fun isOptedOut ()Z
 	public final fun optIn ()V
 	public final fun optIn (Lcom/tranthor/sdk/TranthorCallback;)V
@@ -221,6 +261,10 @@ public final class com/tranthor/sdk/TranthorException$FlushCancelled : com/trant
 	public fun <init> ()V
 }
 
+public final class com/tranthor/sdk/TranthorException$InvalidAppId : com/tranthor/sdk/TranthorException {
+	public fun <init> ()V
+}
+
 public final class com/tranthor/sdk/TranthorException$InvalidHost : com/tranthor/sdk/TranthorException {
 	public fun <init> ()V
 }
@@ -243,11 +287,13 @@ public final class com/tranthor/sdk/TranthorException$StoreTemporarilyUnavailabl
 
 public final class com/tranthor/sdk/TranthorSDK {
 	public static final field Companion Lcom/tranthor/sdk/TranthorSDK$Companion;
-	public synthetic fun <init> (Lcom/tranthor/sdk/Configuration;Lcom/tranthor/sdk/SdkTransport;Lkotlin/jvm/functions/Function2;Lcom/tranthor/sdk/NamespaceLease;Lcom/tranthor/sdk/JsonStore;Lcom/tranthor/sdk/StoredState;Ljava/util/Map;Lcom/tranthor/sdk/Platform;JLkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public synthetic fun <init> (Lcom/tranthor/sdk/Configuration;Lcom/tranthor/sdk/SdkTransport;Lkotlin/jvm/functions/Function2;Lcom/tranthor/sdk/NamespaceLease;Lcom/tranthor/sdk/JsonStore;Lcom/tranthor/sdk/StoredState;Ljava/util/Map;Lcom/tranthor/sdk/Platform;JLcom/tranthor/sdk/IdentityTimings;Lkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public final fun flush (Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
 	public final fun getAnonymousId ()Ljava/lang/String;
 	public final fun getUserId ()Ljava/lang/String;
-	public final fun identify (Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+	public final fun identify (Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;Ljava/lang/String;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+	public final synthetic fun identify (Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+	public static synthetic fun identify$default (Lcom/tranthor/sdk/TranthorSDK;Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;Ljava/lang/String;Lkotlin/coroutines/Continuation;ILjava/lang/Object;)Ljava/lang/Object;
 	public static synthetic fun identify$default (Lcom/tranthor/sdk/TranthorSDK;Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;Lkotlin/coroutines/Continuation;ILjava/lang/Object;)Ljava/lang/Object;
 	public final fun isOptedOut ()Z
 	public final fun optIn (Lkotlin/coroutines/Continuation;)Ljava/lang/Object;

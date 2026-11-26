@@ -7,6 +7,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -23,13 +24,34 @@ class OptOutRemovalTest {
 
     @After fun stop() { server.close(); root.deleteRecursively() }
 
+    /**
+     * A short [flushIntervalMs] is real time, so on a slow machine the interval could elapse between the test's setup calls
+     * and its `optOut()` and send the queued identify and registration first. Unless [gated] is false, an SDK that is not
+     * opted out yet therefore never lets the interval elapse until it has been seen opted out (an instance restarted opted
+     * out runs freely at once). The interval is still real time after that, which is what the tests about it measure.
+     */
     private suspend fun sdk(
         host: String = server.url, flushIntervalMs: Int = 60000, storeWrite: ((ByteArray, File) -> Unit)? = null,
         clock: () -> Long = System::currentTimeMillis, retries: Int = 0, maxQueueSize: Int = 10_000,
-        onError: ((BatchFailure) -> Unit)? = null,
-    ) = configureJvm(Configuration("Basic push-fixture==", host = host, batchSize = 100, flushIntervalMs = flushIntervalMs,
-        retries = retries, baseDelay = 10, storageNamespace = "opt-out", storageDirectory = root, maxQueueSize = maxQueueSize,
-        onError = onError), storeWrite = storeWrite, platform = JvmPlatform(clock = clock))
+        onError: ((BatchFailure) -> Unit)? = null, sleeper: ManualSleeper? = null, gated: Boolean = true,
+    ): TranthorSDK {
+        val created = java.util.concurrent.atomic.AtomicReference<TranthorSDK?>()
+        val opened = java.util.concurrent.atomic.AtomicBoolean(false)
+        // The interval is told apart from the SDK's other waits (retry backoff doubles from `baseDelay` 10 ms) by its length, so the
+        // two must differ; the hold and pause timers are far longer.
+        val backoffs = (0..retries).map { 10.0 * Math.pow(2.0, it.toDouble()) }
+        require(flushIntervalMs.toDouble() !in backoffs) { "The flush interval must differ from the retry backoff lengths $backoffs" }
+        val gate: (suspend (Double) -> Unit)? = if (!gated || sleeper != null) null else { ms ->
+            if (ms == flushIntervalMs.toDouble()) {
+                while (!opened.get()) { if (created.get()?.isOptedOut == true) opened.set(true) else delay(1) }
+            }
+            sleepMilliseconds(ms)
+        }
+        return configureJvm(Configuration("Basic push-fixture==", host = host, batchSize = 100, flushIntervalMs = flushIntervalMs,
+            retries = retries, baseDelay = 10, storageNamespace = "opt-out", storageDirectory = root, maxQueueSize = maxQueueSize,
+            onError = onError), storeWrite = storeWrite, sleeper = sleeper, sleep = gate, platform = JvmPlatform(clock = clock))
+            .also { created.set(it) }
+    }
 
     /** Every event that reached the server with a 2xx or not, in arrival order. */
     private fun sent(): List<Map<String, JsonValue>> = requests.flatMap { request ->
@@ -121,14 +143,20 @@ class OptOutRemovalTest {
     }
 
     @Test fun optingBackInMakesOneNewCycleThatSendsTheRemovalFirstAndRegistersStrictlyLater() = runBlocking {
-        status = 503
-        val sdk = sdk(flushIntervalMs = 100)
+        // The first request is answered 503 and every later one 204, decided as each request arrives (the hooks of other tests
+        // count requests the same way), so the test never races its own change of `status` against the first response.
+        respond = { if (requests.size == 1) 503 else 204 }
+        // The flush interval never elapses (nothing releases the sleeper), so the queued identify and registration cannot
+        // be sent by a timer before optOut() on a slow machine: only the opt-out removal is ever the first request.
+        val sleeper = ManualSleeper()
+        val sdk = sdk(flushIntervalMs = 100, sleeper = sleeper)
         sdk.identify("user-1")
         sdk.registerInstallation("fcm-token-1", "com.example.shop", InstallationPermission.GRANTED)
         sdk.optOut()
         waitUntil { requests.size >= 1 }
-        status = 204
-        delay(300) // Several intervals: an exhausted cycle waits for a trigger.
+        waitUntil { !sdk.deliveryCycleActive() } // the exhausted cycle has ended
+        // An exhausted cycle waits for a trigger: it arms no timer and starts no cycle.
+        assertNull(sdk.pendingTimer())
         assertEquals(1, requests.size)
         sdk.optIn()
         waitUntil { sent().any { it.event() == "Installation Registered" } }
@@ -512,11 +540,11 @@ class OptOutRemovalTest {
             "Installation Registered" to "fcm-token-2"), delivered)
     }
 
-    @Test fun anOverflowWithNothingSupersededDropsTheOldestInstallationEvent() = runBlocking {
+    @Test fun anOverflowWithNothingSupersededNeverDropsARemoval() = runBlocking {
         val (dropped, delivered) = installationOnlyOverflow(maxQueueSize = 1)
-        assertEquals(listOf("Installation Registered(<redacted>)", "Installation Removed(<redacted>)",
-            "Installation Registered(<redacted>)"), dropped)
-        assertEquals(listOf("Installation Removed" to "fcm-token-1", "Installation Registered" to "fcm-token-2"), delivered)
+        // A removal is never the event a trim drops: only older registrations go, and the newest registration stays.
+        assertEquals(listOf("Installation Registered(<redacted>)", "Installation Registered(<redacted>)"), dropped)
+        assertEquals(listOf("Installation Removed" to "fcm-token-1", "Installation Removed" to "fcm-token-1", "Installation Registered" to "fcm-token-2"), delivered)
     }
 
     /** A process start over a parked removal; [holdStartRequest] keeps the start cycle's request in flight. */

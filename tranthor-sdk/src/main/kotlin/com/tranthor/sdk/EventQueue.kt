@@ -23,6 +23,11 @@ internal class EventQueue(
     /** Files of events that are already gone from memory (sent or refused) but could not be deleted yet. */
     private val awaitingDeletion = LinkedHashSet<Long>()
 
+    /** After the files are gone (opted out at start): new events are numbered from [minimum] at least. */
+    fun numberFrom(minimum: Long) { nextSequence = maxOf(nextSequence, minimum) }
+
+    /** The number the next admitted event gets. */
+    val nextSequenceNumber: Long get() = nextSequence
     val hasQueued: Boolean get() = queued.isNotEmpty()
     val queuedCount: Int get() = queued.size
     val activeCount: Int get() = active.size
@@ -38,8 +43,10 @@ internal class EventQueue(
      * Throws [TranthorException.StoreTemporarilyUnavailable] when a file cannot be read, and [IOException]
      * when the folder cannot be listed.
      */
-    fun load(legacy: List<QueueItem>) {
+    fun load(legacy: List<QueueItem>, minNextSequence: Long = 0) {
         queued.clear(); active = emptyList(); awaitingDeletion.clear()
+        // Also when the folder does not exist or is empty: numbers never start below the state file's marker.
+        nextSequence = maxOf(1L, minNextSequence)
         if (legacy.isNotEmpty()) {
             ensureDirectory()
             legacy.forEachIndexed { index, item -> writeBytes(item.json.toByteArray(Charsets.UTF_8), fileFor(index + 1L)) }
@@ -67,7 +74,9 @@ internal class EventQueue(
         }
         // Set-aside files keep their numbers, so a later event never takes the name of one.
         val highest = names.mapNotNull { NUMBERED_FILE.matchEntire(it)?.groupValues?.get(1)?.toLongOrNull() }.maxOrNull() ?: 0L
-        nextSequence = highest + 1
+        // A marker the state file keeps (see StoredState.currentUserFrom) must stay below every new event's number, also
+        // when the folder is empty and would otherwise number from 1 again.
+        nextSequence = maxOf(highest + 1, minNextSequence)
     }
 
     private fun listNames(): Array<String> = directory.list() ?: throw IOException("Unable to list the event queue")
@@ -128,11 +137,34 @@ internal class EventQueue(
     /** Removes queued events above [capacity], preferring ordinary ones, and deletes their files. Returns them. */
     fun trim(capacity: Int): List<QueueItem> = trimQueue(queued, capacity).also(::discardFilesOrRetryLater)
 
-    /** Moves up to [maxSize] queued events, oldest first, into the active batch and returns it. */
-    fun takeBatch(maxSize: Int): List<QueueItem> {
-        val batch = List(minOf(maxSize, queued.size)) { queued.removeFirst() }
+    /** The events waiting to be sent, oldest first. Read only. */
+    val queuedItems: List<QueueItem> get() = queued
+
+    /** The batch in flight. Read only. */
+    val activeItems: List<QueueItem> get() = active
+
+    /**
+     * Moves up to [maxSize] queued events, oldest first, into the active batch and returns it. [count] may take
+     * fewer (a request carries at most 10 users when identity tokens are in use); it is asked with the queue and
+     * [maxSize], and at least one event is always taken.
+     */
+    fun takeBatch(maxSize: Int, count: ((List<QueueItem>, Int) -> Int)? = null): List<QueueItem> {
+        val wanted = count?.invoke(queued, maxSize) ?: minOf(maxSize, queued.size)
+        val batch = List(wanted.coerceIn(1, minOf(maxSize, queued.size))) { queued.removeFirst() }
         active = batch
         return batch
+    }
+
+    /** Removes [items] from the active batch for good (their files are deleted, or deleted later if that fails). */
+    fun removeFromActive(items: List<QueueItem>) {
+        discardFilesOrRetryLater(items)
+        active = active.filter { item -> items.none { it === item } }
+    }
+
+    /** Puts [items] of the active batch back at the head of the queue, in their original order; the rest stays active. */
+    fun returnToHead(items: List<QueueItem>) {
+        for (index in items.indices.reversed()) queued.addFirst(items[index])
+        active = active.filter { item -> items.none { it === item } }
     }
 
     /** The active batch was delivered or refused for good: its files are deleted, or deleted later if that fails. */

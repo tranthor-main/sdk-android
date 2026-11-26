@@ -27,7 +27,19 @@ internal class StoredState(
     var installation: StoredInstallation? = null,
     /** `Installation Removed` events made by opt-out, delivered even while opted out. */
     var pendingRemovals: MutableList<QueueItem> = ArrayList(),
+    /** Identity tokens by user id (see [TokenCache]). Stored in this file with the queue, never in a shared store. */
+    var tokens: TokenCache = TokenCache(),
+    /** Set once an identity token has been passed to `identify`; it is never cleared. See [TranthorSDK] identity in use. */
+    var identityTokenSupplied: Boolean = false,
+    /**
+     * The queue number at which the current user's events begin: queued events numbered below it belong to a user who has
+     * signed out. Set by reset(); 0 means every queued event is the current user's. It outlives an empty queue
+     * (the queue folder renumbers from the marker at load) and a salvaged state file.
+     */
+    var currentUserFrom: Long = 0,
 ) {
+    /** Set by [decode] when the marker was present but unreadable: which queued events are the current user's is unknown. Not saved. */
+    var currentUserFromUnknown: Boolean = false
     /** Encodes identity, consent, the push installation and opt-out removals; queued events live in their own files. */
     fun encode(): ByteArray {
         val out = StringBuilder(256)
@@ -38,6 +50,15 @@ internal class StoredState(
         installation?.let {
             out.append(",\"installation\":")
             JsonCodec.encode(JsonValue.of(mapOf("token" to it.token, "appId" to it.appId, "permissionState" to it.permission.wireValue)), out)
+        }
+        // Optional key: set once an identity token has been passed to identify; identity stays "in use" after refusals delete tokens.
+        if (identityTokenSupplied) out.append(",\"identityTokenSupplied\":true")
+        if (currentUserFrom > 0) out.append(",\"currentUserFrom\":").append(currentUserFrom)
+        if (!tokens.isEmpty()) {
+            // Optional key, like installation: older builds ignore it. A token is a credential: it is written
+            // here, with the same protection as the queue, and nowhere else.
+            out.append(",\"identityTokens\":")
+            JsonCodec.encode(JsonValue.ObjectValue(tokens.users.associateWithTo(LinkedHashMap()) { JsonValue.StringValue(tokens.get(it)!!) }), out)
         }
         if (pendingRemovals.isNotEmpty()) {
             out.append(",\"pendingRemovals\":[")
@@ -69,7 +90,26 @@ internal class StoredState(
                 is JsonValue.BooleanValue -> value.value
                 else -> throw IllegalArgumentException("Invalid consent field")
             }
-            return StoredState(anonymous, user, optedOut, installation(root["installation"]), pendingRemovals(root["pendingRemovals"]))
+            val marker = currentUserFrom(root)
+            return StoredState(anonymous, user, optedOut, installation(root["installation"]), pendingRemovals(root["pendingRemovals"]),
+                tokens(root["identityTokens"]), root["identityTokenSupplied"]?.booleanValue == true, marker ?: 0L)
+                .also { it.currentUserFromUnknown = marker == null }
+        }
+
+        /**
+         * The marker: 0 when absent, null when present but not a non-negative whole number. A bad marker costs only the marker:
+         * the rest of the state (pending removals, the push registration) is kept and the caller treats the queue as unknown.
+         */
+        private fun currentUserFrom(root: Map<String, JsonValue>): Long? {
+            val value = root["currentUserFrom"] ?: return 0L
+            return value.numberValue?.takeIf { it.isFinite() && it >= 0 && it < 9.0e15 && it == Math.floor(it) }?.toLong()
+        }
+
+        /** A damaged entry is dropped, not treated as state damage: the provider supplies the token again. */
+        private fun tokens(value: JsonValue?): TokenCache {
+            val cache = TokenCache()
+            for ((userId, token) in value?.objectValue.orEmpty()) token.stringValue?.let { cache.set(userId, it) }
+            return cache
         }
 
         /** Damaged entries are dropped, not treated as state damage, like a damaged installation. */
@@ -100,6 +140,9 @@ internal class StoredState(
             val root = runCatching { JsonValue.parse(String(bytes, Charsets.UTF_8)).objectValue }.getOrNull() ?: return result
             root["anonymousId"]?.stringValue?.takeIf(::isUuid)?.let { result.anonymousId = it }
             result.userId = root["userId"]?.stringValue
+            // Identity stays in use: without the flag a refusal would drop a batch the app expects to be held.
+            result.identityTokenSupplied = root["identityTokenSupplied"]?.booleanValue == true
+            result.currentUserFrom = currentUserFrom(root) ?: 0L
             return result
         }
 
@@ -157,6 +200,9 @@ internal class JsonStore(
      */
     var interruptedOptOut: Boolean = false
         private set
+    /** Set by [load] when the state file was damaged and only its identity was kept: which queued events are the current user's is unknown. */
+    var stateWasDamaged: Boolean = false
+        private set
     /** Set by [load]: the unsent events a release 0.1.0 state file held, for the one-time move into the queue folder. */
     var legacyEvents: List<QueueItem> = emptyList()
         private set
@@ -201,6 +247,7 @@ internal class JsonStore(
             } else {
                 unsupportedStateVersion = StoredState.declaresFutureVersion(stateData)
                 state = StoredState.salvageIdentity(stateData)
+                stateWasDamaged = true
                 quarantine(stateFile, corruptFile)
             }
         }

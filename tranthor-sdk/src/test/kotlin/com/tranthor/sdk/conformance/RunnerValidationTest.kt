@@ -30,6 +30,11 @@ class RunnerValidationTest {
         assertThrows(CheckFailure::class.java) { validateEnvelope(j("""{"batch":[],"context":{"library":"wrong"}}""")) }
         assertThrows(CheckFailure::class.java) { validateEnvelope(j("""{"batch":[],"unexpected":true}""")) }
         assertThrows(CheckFailure::class.java) { validateEnvelope(j("""{"batch":{}}""")) }
+        // identityTokens is the one other key, a nonempty list of strings.
+        validateEnvelope(j("""{"batch":[],"identityTokens":["a","b"]}"""))
+        assertThrows(CheckFailure::class.java) { validateEnvelope(j("""{"batch":[],"identityTokens":[]}""")) }
+        assertThrows(CheckFailure::class.java) { validateEnvelope(j("""{"batch":[],"identityTokens":[1]}""")) }
+        assertThrows(CheckFailure::class.java) { validateEnvelope(j("""{"batch":[],"identityTokens":"a"}""")) }
         assertThrows(CheckFailure::class.java) { validateEnvelope(null) }
     }
 
@@ -108,6 +113,36 @@ class RunnerValidationTest {
         val declaration = Declaration("test", listOf("core", "transport", "durable-queue"), "1", null, listOf(KnownFailure("retries-exhausted", "r", "issue-1")))
         assertThrows(CheckFailure::class.java) { declaration.validate(listOf(replaced), "1") }
         Declaration("test", listOf("core", "transport"), "1", null, listOf(KnownFailure("retries-exhausted", "r", "issue-1"))).validate(listOf(replaced), "1")
+    }
+
+    @Test fun identityScenariosLoadAndTheirCapabilitiesAndRefsAreChecked() {
+        val schema = Schema(j(fixture("scenario.schema.json")))
+        val scenario = j(fixture("scenarios/identity-token-403-renews-and-retries.json"))
+        schema.validate(scenario)
+        validateReferences(scenario)
+        Declaration("test", listOf("core", "transport", "identity-token", "app-id"), "1", null, emptyList()).validate(listOf(scenario), "1")
+        // The provider's `else` branch rejects a ref on a non-token outcome; `not` and `else` are real keywords here.
+        val badProvider = j("""{"result":"error","ref":"t1"}""")
+        val config = scenario["config"]!!.objectValue!!
+        val identity = JsonValue.ObjectValue(config["identity"]!!.objectValue!! + ("provider" to JsonValue.ArrayValue(listOf(badProvider))))
+        assertThrows(CheckFailure::class.java) { schema.validate(JsonValue.ObjectValue(scenario.objectValue!! + ("config" to JsonValue.ObjectValue(config + ("identity" to identity))))) }
+        // Identity fields require their capability, a ref is defined once, and a request may name only a defined ref.
+        assertThrows(CheckFailure::class.java) { validateReferences(JsonValue.ObjectValue(scenario.objectValue!! + ("capabilities" to j("""["core"]""")))) }
+        val duplicate = j("""{"id":"d","capabilities":["core","identity-token"],"steps":[
+            {"op":"emit","call":"a","method":"identify","data":{"userId":"u"},"identityToken":{"ref":"t","sub":"u","ttlSeconds":1}},
+            {"op":"emit","call":"b","method":"identify","data":{"userId":"u"},"identityToken":{"ref":"t","sub":"u","ttlSeconds":1}}]}""")
+        assertThrows(CheckFailure::class.java) { validateReferences(duplicate) }
+        val unknown = j("""{"id":"d","capabilities":["core","identity-token"],"steps":[{"op":"emit","call":"a","method":"track","data":{"userId":"u"}},
+            {"op":"assert","expect":{"requests":[{"batch":[{"call":"a"}],"identityTokens":["never-defined"]}],"errors":[]}}]}""")
+        assertThrows(CheckFailure::class.java) { validateReferences(unknown) }
+        // A request may name only a ref that an earlier step defined.
+        val later = j("""{"id":"d","capabilities":["core","identity-token"],"steps":[
+            {"op":"emit","call":"a","method":"track","data":{"userId":"u"}},
+            {"op":"assert","expect":{"requests":[{"batch":[{"call":"a"}],"identityTokens":["t"]}],"errors":[]}},
+            {"op":"emit","call":"b","method":"identify","data":{"userId":"u"},"identityToken":{"ref":"t","sub":"u","ttlSeconds":1}}]}""")
+        assertThrows(CheckFailure::class.java) { validateReferences(later) }
+        val tokenOnTrack = j("""{"id":"d","capabilities":["core","identity-token"],"steps":[{"op":"emit","call":"a","method":"track","data":{"userId":"u"},"identityToken":{"ref":"t","sub":"u","ttlSeconds":1}}]}""")
+        assertThrows(CheckFailure::class.java) { validateReferences(tokenOnTrack) }
     }
 
     @Test fun subsetChecksNestedObjectsButArraysExactly() {

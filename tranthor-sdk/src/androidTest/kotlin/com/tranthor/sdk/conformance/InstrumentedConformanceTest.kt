@@ -9,7 +9,9 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.uiautomator.UiDevice
+import com.tranthor.sdk.AndroidPlatform
 import com.tranthor.sdk.Configuration
+import com.tranthor.sdk.IdentityTimings
 import com.tranthor.sdk.TranthorSDK
 import java.io.File
 import kotlinx.coroutines.delay
@@ -29,7 +31,7 @@ class LifecycleTestActivity : Activity() {
 
 /**
  * Instrumented adapter on the emulator: the real SDK with AndroidPlatform (AtomicFile persistence,
- * HttpURLConnection, ProcessLifecycleOwner hook). Declares all seven capabilities with
+ * HttpURLConnection, ProcessLifecycleOwner hook). Declares all nine capabilities with
  * lifecycleSource "os-hook": the `background` step presses the real Home button through
  * UiAutomator, and the runner asserts ProcessLifecycleOwner actually reached CREATED (ON_STOP).
  *
@@ -44,14 +46,16 @@ class InstrumentedConformanceTest {
         private val results = File(target.getExternalFilesDir(null) ?: target.filesDir, "conformance-results.jsonl").apply { writeText("") }
         private var activity: ActivityScenario<LifecycleTestActivity>? = null
         override val adapterName = "TranthorSDK Android instrumented"
-        override val capabilities = listOf("core", "transport", "persistence", "lifecycle", "consent", "identity-link", "durable-queue")
+        override val capabilities = listOf("core", "transport", "persistence", "lifecycle", "consent", "identity-link", "durable-queue", "identity-token", "app-id")
         override val lifecycleSource: String = "os-hook"
         override fun readText(path: String): String =
             instrumentation.context.assets.open(path).use { String(it.readBytes(), Charsets.UTF_8) }
         override fun scenarioFiles(): List<String> =
             instrumentation.context.assets.list("scenarios")!!.filter { it.endsWith(".json") }
         override fun temporaryDirectory(): File = target.cacheDir
-        override suspend fun makeSdk(configuration: Configuration): TranthorSDK = TranthorSDK.configure(target, configuration)
+        // configure() with the two identity timings scaled for real-time scenarios.
+        override suspend fun makeSdk(configuration: Configuration, timings: IdentityTimings): TranthorSDK =
+            TranthorSDK.create(configuration, AndroidPlatform(target.applicationContext ?: target), identityTimings = timings)
 
         private fun processState(): Lifecycle.State {
             var state = Lifecycle.State.INITIALIZED

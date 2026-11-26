@@ -22,7 +22,7 @@ internal class Schema(private val root: J) {
     private val supported = setOf(
         "\$schema", "\$id", "title", "definitions", "\$ref", "type", "properties", "required",
         "additionalProperties", "enum", "const", "pattern", "minLength", "minimum", "maximum", "items", "minItems",
-        "uniqueItems", "contains", "oneOf", "anyOf", "allOf", "if", "then",
+        "uniqueItems", "contains", "oneOf", "anyOf", "allOf", "not", "if", "then", "else",
     )
 
     fun validate(value: J, schema: J? = null, path: String = "$") {
@@ -80,9 +80,12 @@ internal class Schema(private val root: J) {
                 "$keyword mismatch $path",
             )
         }
+        map["not"]?.let { require(!passes(value, it, path), "Not mismatch $path") }
         val condition = map["if"]
-        val then = map["then"]
-        if (condition != null && then != null && passes(value, condition)) validate(value, then, path)
+        if (condition != null) {
+            val branch = if (passes(value, condition)) map["then"] else map["else"]
+            if (branch != null) validate(value, branch, path)
+        }
     }
 
     private fun passes(value: J, schema: J, path: String = "$"): Boolean =
@@ -106,9 +109,28 @@ internal fun validIndex(value: J?, count: Int): Boolean =
 internal fun validateReferences(scenario: J) {
     val calls = HashMap<String, J>()
     val labels = HashMap<String, String>()
-    val linking = (scenario["capabilities"]?.arrayValue ?: emptyList()).any { it.stringValue == "identity-link" }
+    val capabilities = (scenario["capabilities"]?.arrayValue ?: emptyList()).mapNotNull { it.stringValue }
+    val linking = "identity-link" in capabilities
+    // Identity tokens are minted at run time and named by ref; a ref is defined once and may be named only after that.
+    val refs = HashSet<String>()
+    fun needs(capability: String, what: String) = require(capability in capabilities, "$what must require $capability")
+    fun define(ref: String) = require(refs.add(ref), "Duplicate token ref $ref")
+    scenario["config"]?.get("identity")?.let { identity ->
+        needs("identity-token", "config.identity")
+        for (outcome in identity["provider"]?.arrayValue ?: emptyList()) {
+            if (outcome["result"]?.stringValue == "token") define(outcome["ref"]?.stringValue ?: "")
+        }
+    }
+    if (scenario["server"]?.get("identity") != null) needs("identity-token", "server.identity")
+    if (scenario["config"]?.get("appId") != null) needs("app-id", "config.appId")
+    // Refs of the scripted provider exist from the start; an emit step's ref exists from that step on.
     for (step in scenario["steps"]?.arrayValue ?: emptyList()) {
         val op = step["op"]?.stringValue ?: ""
+        step["identityToken"]?.let { spec ->
+            needs("identity-token", "emit identityToken")
+            require(step["method"]?.stringValue == "identify" && step["data"]?.get("userId")?.stringValue != null, "identityToken belongs on an identify with a userId")
+            define(spec["ref"]?.stringValue ?: "")
+        }
         if (op == "anonymousId") require(linking, "anonymousId step must require identity-link")
         (step["call"]?.stringValue ?: step["label"]?.stringValue)?.let { label ->
             require(labels[label] == null, "Duplicate label $label")
@@ -117,7 +139,13 @@ internal fun validateReferences(scenario: J) {
         }
         val expect = step["expect"] ?: continue
         val requests = expect["requests"]?.arrayValue ?: emptyList()
+        if (expect["providerCalls"] != null) needs("identity-token", "expect.providerCalls")
+        if (expect["notices"] != null) needs("identity-token", "expect.notices")
         for (request in requests) {
+            for (ref in request["identityTokens"]?.arrayValue ?: emptyList()) {
+                needs("identity-token", "identityTokens")
+                require(ref.stringValue in refs, "Unknown token ref ${ref.stringValue}")
+            }
             for (item in request["batch"]?.arrayValue ?: emptyList()) {
                 val data = calls[item["call"]?.stringValue ?: ""] ?: throw CheckFailure("Unknown item call")
                 if (item["anonymousIdRef"] != null) {
@@ -157,7 +185,7 @@ internal class Declaration(
     val knownFailures: List<KnownFailure>,
 ) {
     fun validate(scenarios: List<J>, version: String) {
-        val allowed = setOf("core", "transport", "persistence", "lifecycle", "consent", "identity-link", "durable-queue")
+        val allowed = setOf("core", "transport", "persistence", "lifecycle", "consent", "identity-link", "durable-queue", "identity-token", "app-id")
         require(name.isNotEmpty() && suiteVersion == version && version.isNotEmpty(), "Invalid declaration name/version")
         require(allowed.containsAll(capabilities) && capabilities.toSet().size == capabilities.size, "Invalid capabilities")
         lifecycleSource?.let { require(it == "os-hook" || it == "public-method", "Invalid lifecycle source") }
@@ -189,10 +217,17 @@ internal fun subset(expected: J, actual: J?, path: String) {
     }
 }
 
-/** Stricter Android SDK invariant: production never sends envelope context; the body is exactly {batch}. */
+/**
+ * Stricter Android SDK invariant: production never sends envelope context; the body is `batch`, plus
+ * `identityTokens` (a list of strings) only when a user in the batch has a token.
+ */
 internal fun validateEnvelope(body: J?) {
-    require(body?.objectValue?.keys == setOf("batch"), "Android SDK envelope must contain exactly batch")
+    val keys = body?.objectValue?.keys
+    require(keys == setOf("batch") || keys == setOf("batch", "identityTokens"), "Android SDK envelope must contain exactly batch and, with tokens, identityTokens")
     require(body?.get("batch")?.arrayValue != null, "Android SDK batch must be an array")
+    body?.get("identityTokens")?.let { tokens ->
+        require(tokens.arrayValue?.isNotEmpty() == true && tokens.arrayValue!!.all { it.stringValue != null }, "identityTokens must be a nonempty list of strings")
+    }
 }
 
 internal fun requestDiagnostics(records: List<J>): J = arr(records.map { record ->

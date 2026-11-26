@@ -57,6 +57,7 @@ internal class AndroidPlatform(private val context: Context) : Platform {
         try { context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "" } catch (_: Exception) { "" }
     }
     override val osVersion: String get() = Build.VERSION.RELEASE ?: ""
+    override val packageName: String get() = context.packageName ?: ""
     override fun logDebug(message: String) {
         if (Log.isLoggable(TAG, Log.DEBUG)) Log.d(TAG, message)
     }

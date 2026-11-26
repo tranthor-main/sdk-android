@@ -18,6 +18,8 @@ internal interface Platform {
     /** The host app's version name and the OS release, reported with `Installation Registered` ("" when unknown). */
     val appVersion: String
     val osVersion: String
+    /** The application's package name: the default app id sent with every request ("" when unknown, which sends none). */
+    val packageName: String
     /** Wall-clock time for Installation event timestamps (a fixed clock in host tests). */
     fun currentTimeMs(): Long = System.currentTimeMillis()
     /** Installs process lifecycle hooks; returns a disposer. Called once per instance. */

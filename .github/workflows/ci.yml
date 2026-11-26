@@ -29,6 +29,8 @@ jobs:
       - run: ./gradlew build --no-daemon
       # FCM sender script tests (local stub, no network or credentials).
       - run: node --test scripts/send-fcm-push.test.mjs
+      # Conformance mock server tests, including its identity-token support.
+      - run: node --test conformance/server/server.test.cjs conformance/server/identity.test.cjs
       # JVM conformance against the vendored mock server (lifecycle scenarios are skipped on the JVM).
       - run: scripts/test-host.sh --no-daemon
       # Emulator conformance and example UI tests are local-only (scripts/test-emulator.sh --example).
