@@ -9,6 +9,15 @@ import java.io.File
  * @property writeKey complete Authorization header value, sent verbatim.
  * @property host origin, default `https://api.tranthor.com`; trailing slashes are removed and an
  * invalid HTTP(S) URL makes [TranthorSDK.configure] throw.
+ * @property identityTokenProvider supplies and renews identity tokens, see [TranthorSDK.identify]. It receives a
+ * user id and returns that user's token, or null when there is none. It is called off the SDK's own executor and
+ * the SDK waits at most 20 seconds for it, so a slow or failing provider never keeps events back.
+ * @property onNotice receives diagnostics that are not delivery failures, see [Notice]. It runs on the SDK's serial
+ * executor: return promptly.
+ * @property appId sent as `x-tranthor-app-id` on every request. Null (the default) sends the application's
+ * package name. A value that cannot be an HTTP header value (empty, spaces at either end, a newline or any character
+ * outside printable ASCII) makes [TranthorSDK.configure] throw [TranthorException.InvalidAppId]; the SDK never sends
+ * an id you did not choose.
  */
 public class Configuration private constructor(
     public val writeKey: String,
@@ -22,6 +31,9 @@ public class Configuration private constructor(
     public val storageDirectory: File?,
     public val maxQueueSize: Int,
     public val onError: ((BatchFailure) -> Unit)?,
+    public val identityTokenProvider: (suspend (String) -> String?)?,
+    public val appId: String?,
+    public val onNotice: ((Notice) -> Unit)?,
 ) {
     @JvmOverloads
     public constructor(
@@ -36,6 +48,9 @@ public class Configuration private constructor(
         storageDirectory: File? = null,
         maxQueueSize: Int = DEFAULT_MAX_QUEUE_SIZE,
         onError: ((BatchFailure) -> Unit)? = null,
+        identityTokenProvider: (suspend (String) -> String?)? = null,
+        appId: String? = null,
+        onNotice: ((Notice) -> Unit)? = null,
     ) : this(
         writeKey = writeKey,
         host = host,
@@ -48,12 +63,16 @@ public class Configuration private constructor(
         storageDirectory = storageDirectory,
         maxQueueSize = if (maxQueueSize > 0) maxQueueSize else DEFAULT_MAX_QUEUE_SIZE,
         onError = onError,
+        identityTokenProvider = identityTokenProvider,
+        appId = appId,
+        onNotice = onNotice,
     )
 
     /** Never includes the write key. */
     override fun toString(): String =
         "Configuration(host=$host, batchSize=$batchSize, flushIntervalMs=$flushIntervalMs, retries=$retries, " +
-            "baseDelay=$baseDelay, automaticContext=$automaticContext, storageNamespace=$storageNamespace, maxQueueSize=$maxQueueSize)"
+            "baseDelay=$baseDelay, automaticContext=$automaticContext, storageNamespace=$storageNamespace, maxQueueSize=$maxQueueSize, " +
+            "appId=$appId, identityTokenProvider=${if (identityTokenProvider == null) "none" else "set"})"
 
     /** Java-friendly builder; every setter is optional except the write key. */
     public class Builder(private val writeKey: String) {
@@ -67,6 +86,9 @@ public class Configuration private constructor(
         private var storageDirectory: File? = null
         private var maxQueueSize = DEFAULT_MAX_QUEUE_SIZE
         private var onError: ((BatchFailure) -> Unit)? = null
+        private var identityTokenProvider: (suspend (String) -> String?)? = null
+        private var appId: String? = null
+        private var onNotice: ((Notice) -> Unit)? = null
         public fun host(value: String): Builder = apply { host = value }
         public fun batchSize(value: Number?): Builder = apply { batchSize = value }
         public fun flushIntervalMs(value: Number?): Builder = apply { flushIntervalMs = value }
@@ -77,8 +99,17 @@ public class Configuration private constructor(
         public fun storageDirectory(value: File?): Builder = apply { storageDirectory = value }
         public fun maxQueueSize(value: Int): Builder = apply { maxQueueSize = value }
         public fun onError(value: BatchFailureListener?): Builder = apply { onError = value?.let { listener -> { listener.onFailure(it) } } }
+        /** Kotlin hosts: a suspend function from a user id to that user's identity token, or null. */
+        public fun identityTokenProvider(value: (suspend (String) -> String?)?): Builder = apply { identityTokenProvider = value }
+        /** Java hosts: a blocking supplier of the same thing. It runs on a background thread. */
+        public fun identityTokenSupplier(value: IdentityTokenSupplier?): Builder =
+            apply { identityTokenProvider = value?.let { supplier -> { userId -> supplier.tokenFor(userId) } } }
+        /** Sent as `x-tranthor-app-id` on every request; null sends the application's package name. */
+        public fun appId(value: String?): Builder = apply { appId = value }
+        /** Receives diagnostics that are not delivery failures (see [Notice]); runs on the SDK's serial executor. */
+        public fun onNotice(value: NoticeListener?): Builder = apply { onNotice = value?.let { listener -> { listener.onNotice(it) } } }
         public fun build(): Configuration = Configuration(writeKey, host, batchSize, flushIntervalMs, retries, baseDelay,
-            automaticContext, storageNamespace, storageDirectory, maxQueueSize, onError)
+            automaticContext, storageNamespace, storageDirectory, maxQueueSize, onError, identityTokenProvider, appId, onNotice)
     }
 
     public companion object {
@@ -103,19 +134,83 @@ public fun interface BatchFailureListener {
     public fun onFailure(failure: BatchFailure)
 }
 
-/** A delivery failure: [status] is null for network failures (timeouts, TLS, dropped connections). */
+/** Java-friendly notice callback. Runs on the SDK's serial executor; return promptly. */
+public fun interface NoticeListener {
+    public fun onNotice(notice: Notice)
+}
+
+/** What a [Notice] is about. */
+public enum class NoticeKind {
+    /** The server answered 2xx but dropped events it could not attribute to a verified user (identity Required). */
+    EVENTS_DROPPED,
+    /** The server accepted events it could not verify; with identity Required it would have refused them (identity Monitor). */
+    EVENTS_UNVERIFIED,
+    /** The server refused an identity token and the SDK could not fix it by renewing; delivery is held or retried. */
+    IDENTITY_REFUSED,
+    /** The server could not read its identity settings; the batch is held, not dropped. */
+    IDENTITY_UNAVAILABLE,
+}
+
+/**
+ * A diagnostic that is not a delivery failure: nothing was dropped by the SDK, but the app should know. It never
+ * contains an identity token, a push token or a user id. [count] is set for the two `EVENTS_` kinds, [reason] is the
+ * server's reason for an [NoticeKind.IDENTITY_REFUSED] (`missing`, `signature`, `expired`, ...; an open list).
+ */
+public class Notice internal constructor(
+    /** What the notice is about. */
+    public val kind: NoticeKind,
+    /** A sentence for logs and developers; it names no token, push token or user id. */
+    public val message: String,
+    public val count: Int? = null,
+    public val reason: String? = null,
+) {
+    override fun toString(): String = "Notice(kind=$kind, count=$count, reason=$reason, message=$message)"
+}
+
+/**
+ * An id the SDK can send as the `x-tranthor-app-id` header: non-empty, printable ASCII, no space at either end.
+ */
+internal fun isValidAppId(value: String): Boolean = value.isNotEmpty() && value == value.trim() && isPrintableAscii(value)
+
+internal fun isPrintableAscii(value: String): Boolean = value.all { it in ' '..'~' }
+
+/**
+ * Java-friendly identity token provider: blocks on a background thread and returns the user's token, or null.
+ * The SDK waits at most 20 seconds and then abandons the call, but it cannot interrupt a blocked thread: no second
+ * call starts while an abandoned one is still running. Make the supplier cancellable (give your HTTP call a timeout
+ * well under 20 seconds) so it returns promptly.
+ */
+public fun interface IdentityTokenSupplier {
+    @Throws(Exception::class)
+    public fun tokenFor(userId: String): String?
+}
+
+/**
+ * A delivery failure: [status] is null for network failures (timeouts, TLS, dropped connections). [code] is the
+ * server's machine-readable error code for a 403 or 503 (for example `write_key_app_not_allowed`), or null.
+ */
 public class DeliveryFailure internal constructor(
     public val status: Int?,
     message: String,
     public val retryAfterMs: Double = 0.0,
+    public val code: String? = null,
+    /** The users the server named in an `identity_not_verified` answer; at most 50. */
+    internal val userIds: List<String> = emptyList(),
+    /** The server's reason for refusing an identity token (`missing`, `signature`, `expired`, ...). An open list. */
+    internal val reason: String? = null,
+    /** Whether the response carried a usable Retry-After, which a hold needs to tell "0" from absent. */
+    internal val retryAfterGiven: Boolean = false,
+    /** The Retry-After in ms capped at 5 minutes rather than 30 s, for a hold. */
+    internal val heldAfterMs: Double = 0.0,
 ) : Exception(message) {
     public val retryable: Boolean
         get() = status == null || status == 408 || status == 425 || status == 429 || status in 500..599
 
     override fun equals(other: Any?): Boolean =
-        other is DeliveryFailure && other.status == status && other.message == message && other.retryAfterMs == retryAfterMs
+        other is DeliveryFailure && other.status == status && other.message == message && other.retryAfterMs == retryAfterMs &&
+            other.code == code
     override fun hashCode(): Int = (status ?: -1) * 31 + (message?.hashCode() ?: 0)
-    override fun toString(): String = "DeliveryFailure(status=$status, message=$message, retryAfterMs=$retryAfterMs)"
+    override fun toString(): String = "DeliveryFailure(status=$status, message=$message, retryAfterMs=$retryAfterMs, code=$code)"
 }
 
 /** One terminally failed (or dropped, attempts = 0) batch. */
@@ -127,11 +222,11 @@ public class BatchFailure internal constructor(
     override fun toString(): String = "BatchFailure(error=$error, events=${events.size}, attempts=$attempts)"
 }
 
-/** Only ASCII RFC 9110 delay-seconds; huge values saturate at the 30 s policy cap. */
-internal fun retryAfter(value: String?): Double {
+/** Only ASCII RFC 9110 delay-seconds; huge values saturate at the 30 s policy cap (a hold's cap is 5 minutes). */
+internal fun retryAfter(value: String?, capSeconds: Double = 30.0): Double {
     if (value.isNullOrEmpty() || !value.all { it in '0'..'9' }) return 0.0
     var seconds = 0.0
-    for (digit in value) seconds = minOf(30.0, seconds * 10 + (digit - '0'))
+    for (digit in value) seconds = minOf(capSeconds, seconds * 10 + (digit - '0'))
     return seconds * 1000
 }
 

@@ -148,8 +148,10 @@ internal suspend fun configureJvm(
     storeRead: ((File) -> ByteArray?)? = null,
     storeDelete: ((File) -> Unit)? = null,
     platform: Platform = JvmPlatform(),
+    identityTimings: IdentityTimings = IdentityTimings(),
 ): TranthorSDK = TranthorSDK.create(
     configuration, platform, transport,
     sleep = if (sleeper != null) { ms -> sleeper.sleep(ms) } else ::sleepMilliseconds,
     storeWrite = storeWrite, storeMove = storeMove, storeRead = storeRead, storeDelete = storeDelete,
+    identityTimings = identityTimings,
 )

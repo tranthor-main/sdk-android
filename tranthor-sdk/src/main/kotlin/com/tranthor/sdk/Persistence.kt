@@ -27,6 +27,10 @@ internal class StoredState(
     var installation: StoredInstallation? = null,
     /** `Installation Removed` events made by opt-out, delivered even while opted out. */
     var pendingRemovals: MutableList<QueueItem> = ArrayList(),
+    /** Identity tokens by user id (see [TokenCache]). Stored in this file with the queue, never in a shared store. */
+    var tokens: TokenCache = TokenCache(),
+    /** Set once an identity token has been passed to `identify`; it is never cleared. See [TranthorSDK] identity in use. */
+    var identityTokenSupplied: Boolean = false,
 ) {
     /** Encodes identity, consent, the push installation and opt-out removals; queued events live in their own files. */
     fun encode(): ByteArray {
@@ -38,6 +42,14 @@ internal class StoredState(
         installation?.let {
             out.append(",\"installation\":")
             JsonCodec.encode(JsonValue.of(mapOf("token" to it.token, "appId" to it.appId, "permissionState" to it.permission.wireValue)), out)
+        }
+        // Optional key: set once an identity token has been passed to identify; identity stays "in use" after refusals delete tokens.
+        if (identityTokenSupplied) out.append(",\"identityTokenSupplied\":true")
+        if (!tokens.isEmpty()) {
+            // Optional key, like installation: older builds ignore it. A token is a credential: it is written
+            // here, with the same protection as the queue, and nowhere else.
+            out.append(",\"identityTokens\":")
+            JsonCodec.encode(JsonValue.ObjectValue(tokens.users.associateWithTo(LinkedHashMap()) { JsonValue.StringValue(tokens.get(it)!!) }), out)
         }
         if (pendingRemovals.isNotEmpty()) {
             out.append(",\"pendingRemovals\":[")
@@ -69,7 +81,15 @@ internal class StoredState(
                 is JsonValue.BooleanValue -> value.value
                 else -> throw IllegalArgumentException("Invalid consent field")
             }
-            return StoredState(anonymous, user, optedOut, installation(root["installation"]), pendingRemovals(root["pendingRemovals"]))
+            return StoredState(anonymous, user, optedOut, installation(root["installation"]), pendingRemovals(root["pendingRemovals"]),
+                tokens(root["identityTokens"]), root["identityTokenSupplied"]?.booleanValue == true)
+        }
+
+        /** A damaged entry is dropped, not treated as state damage: the provider supplies the token again. */
+        private fun tokens(value: JsonValue?): TokenCache {
+            val cache = TokenCache()
+            for ((userId, token) in value?.objectValue.orEmpty()) token.stringValue?.let { cache.set(userId, it) }
+            return cache
         }
 
         /** Damaged entries are dropped, not treated as state damage, like a damaged installation. */

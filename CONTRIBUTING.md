@@ -24,7 +24,7 @@ CI runs `./gradlew build`, the FCM script tests and the JVM conformance suite. T
 
 `conformance/` is a language-neutral test suite for the event protocol: a protocol document, scenario files, a JSON schema and a mock server. Scenarios, schema and server are copied unmodified from the suite's source, so do not change them here. One runner (`tranthor-sdk/src/conformance`) is compiled into both the JVM and the instrumented tests, and both read `conformance/` directly.
 
-The JVM adapter declares every capability except lifecycle, because a plain JVM has no `ProcessLifecycleOwner`. The instrumented adapter declares all of them and drives a real Home press.
+The JVM adapter declares every capability except lifecycle, because a plain JVM has no `ProcessLifecycleOwner`; the instrumented adapter declares all nine and drives a real Home press. Both declare `durable-queue`: an exhausted batch is kept, and delivery pauses (see `ExhaustionPause`). The identity timings (provider timeout and provider backoff) are internal `TranthorSDK.create` parameters, which both adapters use to run the identity scenarios in real time with scaled values.
 
 ## Public API
 

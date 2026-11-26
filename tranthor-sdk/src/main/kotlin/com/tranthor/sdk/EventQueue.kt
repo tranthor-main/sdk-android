@@ -128,11 +128,34 @@ internal class EventQueue(
     /** Removes queued events above [capacity], preferring ordinary ones, and deletes their files. Returns them. */
     fun trim(capacity: Int): List<QueueItem> = trimQueue(queued, capacity).also(::discardFilesOrRetryLater)
 
-    /** Moves up to [maxSize] queued events, oldest first, into the active batch and returns it. */
-    fun takeBatch(maxSize: Int): List<QueueItem> {
-        val batch = List(minOf(maxSize, queued.size)) { queued.removeFirst() }
+    /** The events waiting to be sent, oldest first. Read only. */
+    val queuedItems: List<QueueItem> get() = queued
+
+    /** The batch in flight. Read only. */
+    val activeItems: List<QueueItem> get() = active
+
+    /**
+     * Moves up to [maxSize] queued events, oldest first, into the active batch and returns it. [count] may take
+     * fewer (a request carries at most 10 users when identity tokens are in use); it is asked with the queue and
+     * [maxSize], and at least one event is always taken.
+     */
+    fun takeBatch(maxSize: Int, count: ((List<QueueItem>, Int) -> Int)? = null): List<QueueItem> {
+        val wanted = count?.invoke(queued, maxSize) ?: minOf(maxSize, queued.size)
+        val batch = List(wanted.coerceIn(1, minOf(maxSize, queued.size))) { queued.removeFirst() }
         active = batch
         return batch
+    }
+
+    /** Removes [items] from the active batch for good (their files are deleted, or deleted later if that fails). */
+    fun removeFromActive(items: List<QueueItem>) {
+        discardFilesOrRetryLater(items)
+        active = active.filter { item -> items.none { it === item } }
+    }
+
+    /** Puts [items] of the active batch back at the head of the queue, in their original order; the rest stays active. */
+    fun returnToHead(items: List<QueueItem>) {
+        for (index in items.indices.reversed()) queued.addFirst(items[index])
+        active = active.filter { item -> items.none { it === item } }
     }
 
     /** The active batch was delivered or refused for good: its files are deleted, or deleted later if that fails. */

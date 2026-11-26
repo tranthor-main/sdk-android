@@ -13,6 +13,7 @@ internal class JvmPlatform(
     override val appVersion: String = "",
     override val osVersion: String = System.getProperty("os.version") ?: "",
     private val clock: () -> Long = System::currentTimeMillis,
+    override val packageName: String = "",
 ) : Platform {
     override fun currentTimeMs(): Long = clock()
     override fun defaultStorageDirectory(): File =

@@ -41,6 +41,7 @@ public class TranthorSDK private constructor(
     private val context: Map<String, JsonValue>,
     private val platform: Platform,
     private val totalRequestTimeoutMs: Long,
+    private val timings: IdentityTimings,
 ) {
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO.limitedParallelism(1)
     private val scope = CoroutineScope(SupervisorJob() + dispatcher +
@@ -117,6 +118,22 @@ public class TranthorSDK private constructor(
             const val MAX_DOUBLINGS = 4
         }
     }
+    /** True while a batch is held for lack of an identity token. Not persisted: a restart starts without a hold. */
+    private var held = false
+    private var holdTimer: Job? = null
+    private var currentHold: Hold? = null
+    /** Retries a parked opt-out removal on the hold timer. */
+    private var removalTimer: Job? = null
+    /** The provider call that is running, if any: a blocking one cannot be interrupted, so no second call starts meanwhile. */
+    private var providerWorker: Job? = null
+    /** The first user seen on an event before any identify; the current user is the stored one, else this one. */
+    private var notedUser: String? = null
+    private var providerBackoffUntilMs = 0L
+    /** How many requests each queued event has been in, for the attempts reported when it is dropped. */
+    private val sendCounts = java.util.IdentityHashMap<QueueItem, Int>()
+    /** Runs the host's identity provider off the serial executor, so a blocking provider cannot stall the SDK. */
+    private val providerScope = CoroutineScope(SupervisorJob() + Dispatchers.IO +
+        CoroutineExceptionHandler { _, _ -> platform.logDebug("Identity provider task failed") })
 
     private class Snapshot(val anonymousId: String, val userId: String?, val optedOut: Boolean)
     @Volatile private var snapshot = Snapshot(state.anonymousId, state.userId, state.optedOut)
@@ -127,6 +144,35 @@ public class TranthorSDK private constructor(
     public val userId: String? get() = snapshot.userId
     /** Persisted consent. */
     public val isOptedOut: Boolean get() = snapshot.optedOut
+
+    /** The user whose events the app is producing now: the stored user of the last identify, else the first user seen. */
+    private fun currentUser(): String? = state.userId?.takeIf { it.isNotEmpty() } ?: notedUser
+
+    private fun noteUser(userId: String?) {
+        if (!userId.isNullOrEmpty() && currentUser() == null) notedUser = userId
+    }
+
+    /** A token is kept while its user is current or still has events waiting, and not a moment longer. */
+    private fun pruneTokens(vararg extra: String?): Boolean =
+        // Opted out, nobody is current: only an undelivered removal keeps its user's token.
+        state.pruneTokens(store.queue, platform.currentTimeMs(), currentUser()?.takeIf { !state.optedOut }, *extra)
+
+    /**
+     * Identity is in use when a token provider is configured or an identity token has ever been passed to
+     * [identify] on this install. It does not depend on the cache being non-empty now: a refusal deletes the token.
+     */
+    private fun identityInUse(): Boolean = configuration.identityTokenProvider != null || state.identityTokenSupplied
+
+    /** A registration of this install's token under [user] supersedes a removal of it for the same user that an identity refusal parked. */
+    private fun supersedeRemovals(user: String, installation: StoredInstallation): Boolean {
+        // Only a removal parked by an identity refusal is superseded: it could otherwise keep the registration behind it
+        // for good. Any other undelivered removal still goes first, so the server sees them in timestamp order.
+        if (removalParked?.code != IDENTITY_NOT_VERIFIED) return false
+        val target = installation.appId to installation.token
+        val removed = state.pendingRemovals.removeAll { it.value["userId"]?.stringValue == user && installationTarget(it) == target }
+        if (removed && state.pendingRemovals.isEmpty()) { removalParked = null; removalTimer?.cancel(); removalTimer = null }
+        return removed
+    }
 
     private fun publish() { snapshot = Snapshot(state.anonymousId, state.userId, state.optedOut) }
 
@@ -143,6 +189,10 @@ public class TranthorSDK private constructor(
      * stored, the anonymous ID is first replaced by a new UUID, so the next user on the device does not
      * inherit the previous user's anonymous history. Both IDs are persisted together. An empty [userId]
      * is treated like null: it is not stored, sent, linked or used to rotate.
+     *
+     * [identityToken] is the signed-in user's identity token, signed by the app's own backend (see
+     * [Configuration.identityTokenProvider]). It is cached for [userId], persisted with the queue and sent beside
+     * the events, never inside one; it is ignored without a non-empty [userId]. A token is never logged.
      */
     public suspend fun identify(
         userId: String? = null,
@@ -151,6 +201,7 @@ public class TranthorSDK private constructor(
         messageId: String? = null,
         timestamp: String? = null,
         context: Map<String, JsonValue>? = null,
+        identityToken: String? = null,
     ): Unit = withContext(dispatcher) {
         if (state.optedOut || stopped) return@withContext
         val previousUserId = state.userId
@@ -170,17 +221,53 @@ public class TranthorSDK private constructor(
         val registration = if (installation != null && fingerprint != sentInstallation) {
             installationRegistration(state, this@TranthorSDK.context, platform, nextInstallationTime(), installation)
         } else null
+        val tokensBefore = state.tokens.copy()
+        val suppliedBefore = state.identityTokenSupplied
+        val removalsBefore = state.pendingRemovals.toList()
+        var tokenSet = false
+        if (user != null && !identityToken.isNullOrEmpty()) {
+            state.tokens.set(user, identityToken)
+            // Identity is in use from now on, and stays so even when a refusal deletes this token.
+            state.identityTokenSupplied = true
+            tokenSet = true
+        }
+        // Signing the same user in again registers the token, which supersedes a parked removal of it.
+        val superseded = registration != null && user != null && installation != null && supersedeRemovals(user, installation)
+        val pruned = pruneTokens()
+        // A fresh token, or a different user, ends a hold at once: the batch is tried again with what is new.
+        val holdBefore = currentHold
+        val endedHold = held && (tokenSet || (user != null && user != previousUserId))
+        if (endedHold) endHold()
         try {
-            admit(listOfNotNull(data, registration), saveState = state.userId != previousUserId || state.anonymousId != previousAnonymousId)
+            // The state file is written with the identity, the token cache or the parked removals when any changed.
+            admit(listOfNotNull(data, registration),
+                saveState = state.userId != previousUserId || state.anonymousId != previousAnonymousId || tokenSet || pruned || superseded)
             if (registration != null) sentInstallation = fingerprint
+            if (endedHold) beginCycle()
         } catch (error: Throwable) {
             state.userId = previousUserId
             state.anonymousId = previousAnonymousId
+            state.tokens = tokensBefore
+            state.identityTokenSupplied = suppliedBefore
+            state.pendingRemovals = ArrayList(removalsBefore)
+            // The hold it ended is back: nothing about the batch changed.
+            if (endedHold && holdBefore != null) startHold(holdBefore)
             throw error
         } finally {
             publish()
         }
     }
+
+    /** The 0.2.x signature, kept so code compiled against it still links. */
+    @Deprecated("Binary compatibility with 0.2.x only; use the overload with identityToken.", level = DeprecationLevel.HIDDEN)
+    public suspend fun identify(
+        userId: String? = null,
+        anonymousId: String? = null,
+        traits: Map<String, JsonValue>? = null,
+        messageId: String? = null,
+        timestamp: String? = null,
+        context: Map<String, JsonValue>? = null,
+    ): Unit = identify(userId, anonymousId, traits, messageId, timestamp, context, null)
 
     /** Records an event; [files] are passed through verbatim. */
     public suspend fun track(
@@ -238,7 +325,7 @@ public class TranthorSDK private constructor(
         val data = LinkedHashMap<String, JsonValue>()
         data["messageId"] = JsonValue.StringValue(messageId ?: UUID.randomUUID().toString())
         data["timestamp"] = JsonValue.StringValue(time ?: timestamp())
-        userId?.let { data["userId"] = JsonValue.StringValue(it) }
+        userId?.let { data["userId"] = JsonValue.StringValue(it); noteUser(it) }
         anonymousId?.let { data["anonymousId"] = JsonValue.StringValue(it) }
         if (userId == null && anonymousId == null) {
             val stored = state.userId
@@ -292,7 +379,8 @@ public class TranthorSDK private constructor(
                 throw storeError(error)
             }
         }
-        val removed = store.queue.trim(maxOf(0, configuration.maxQueueSize - store.queue.activeCount))
+        // While a batch is held the queue stays small: the oldest events go, and are reported, beyond the limit.
+        val removed = store.queue.trim(maxOf(0, configuration.maxQueueSize - store.queue.activeCount).let { if (held) minOf(it, HELD_QUEUE_LIMIT) else it })
         reportDropped(removed.map { it.value })
         if (store.queue.queuedCount >= configuration.batchSize) beginCycle() else armTimer()
     }
@@ -356,9 +444,15 @@ public class TranthorSDK private constructor(
         val previousUserId = state.userId
         val previousAnonymousId = state.anonymousId
         val previousSentInstallation = sentInstallation
+        val outgoing = currentUser()
+        val previousNotedUser = notedUser
+        val tokensBefore = state.tokens.copy()
         state.userId = null
+        notedUser = null
         state.anonymousId = newAnonymousId()
         sentInstallation = null
+        // The outgoing user's identity token stays until their queued events (the removal among them) have been sent.
+        pruneTokens(outgoing.takeIf { removal != null })
         try {
             // The token stays held: the next identify() registers it to that customer. Nothing is registered now.
             if (removal == null) saveOrThrow() else admit(listOf(removal), saveState = true)
@@ -367,6 +461,8 @@ public class TranthorSDK private constructor(
             state.userId = previousUserId
             state.anonymousId = previousAnonymousId
             sentInstallation = previousSentInstallation
+            notedUser = previousNotedUser
+            state.tokens = tokensBefore
             throw error
         }
         publish()
@@ -378,7 +474,9 @@ public class TranthorSDK private constructor(
      * a stored push Installation is removed on the server by one durable `Installation Removed`,
      * delivered even while opted out. It gets one attempt cycle; after a retryable failure it waits,
      * with no timer, for the next app start, return to the foreground, [optIn] or [optOut], each of
-     * which makes one new cycle, until the server accepts or rejects it.
+     * which makes one new cycle, until the server accepts or rejects it. A `403 identity_not_verified` never rejects it:
+     * after one renewal through the identity provider it stays, is retried every 60 seconds, and each failed attempt is
+     * reported to `onError` with the push token redacted.
      */
     public suspend fun optOut() {
         val outcome = withContext(dispatcher) {
@@ -393,6 +491,10 @@ public class TranthorSDK private constructor(
             cancelTimer()
             // The discarded batch was the reason for the pause; later events start fresh.
             exhaustionPause.reset()
+            endHold()
+            sendCounts.clear()
+            // Only a user with an undelivered removal (and the current user) keeps a token.
+            pruneTokens()
             val pending = cycle
             pending?.cancel(); backoff?.cancel()
             publish()
@@ -410,7 +512,7 @@ public class TranthorSDK private constructor(
 
     /** Whether the delivery cycle has anything to send: opt-out removals always, the queue only while opted in. */
     private fun hasDeliverableWork(): Boolean =
-        if (state.pendingRemovals.isNotEmpty()) removalParked == null else !state.optedOut && store.queue.hasQueued
+        if (state.pendingRemovals.isNotEmpty()) removalParked == null else !state.optedOut && store.queue.hasQueued && !held
 
     /** Persists opt-in and resumes collection. */
     public suspend fun optIn(): Unit = withContext(dispatcher) {
@@ -427,7 +529,15 @@ public class TranthorSDK private constructor(
         state.installation?.takeIf { state.userId != null }?.let { registration ->
             val fingerprint = installationFingerprint(state, platform, registration)
             if (fingerprint != sentInstallation) {
-                admit(listOf(installationRegistration(state, context, platform, nextInstallationTime(), registration)))
+                // Signing the same user in again registers the token, which supersedes a parked removal of it.
+                val removalsBefore = state.pendingRemovals.toList()
+                val superseded = state.userId?.let { supersedeRemovals(it, registration) } == true
+                try {
+                    admit(listOf(installationRegistration(state, context, platform, nextInstallationTime(), registration)), saveState = superseded)
+                } catch (error: Throwable) {
+                    state.pendingRemovals = ArrayList(removalsBefore)
+                    throw error
+                }
                 sentInstallation = fingerprint
             }
         }
@@ -438,6 +548,7 @@ public class TranthorSDK private constructor(
     /** One new attempt cycle for undelivered opt-out removals (app start, foreground, optIn, optOut). */
     private fun triggerRemovals() {
         if (state.pendingRemovals.isEmpty()) return
+        removalTimer?.cancel(); removalTimer = null
         removalTriggers++
         removalParked = null
         beginCycle()
@@ -466,8 +577,11 @@ public class TranthorSDK private constructor(
 
     private suspend fun completeShutdown() {
         cancelTimer()
+        endHold()
+        removalTimer?.cancel(); removalTimer = null
         val pending = cycle
         pending?.cancel(); backoff?.cancel()
+        providerScope.cancel()
         transport.shutdown()
         pending?.join()
         emitDropped()
@@ -494,6 +608,12 @@ public class TranthorSDK private constructor(
         val reported = BatchFailure(failure.error, failure.events.map(::withoutToken), failure.attempts)
         // Callback exceptions do not change delivery.
         try { handler(reported) } catch (_: Throwable) { platform.logDebug("onError callback threw") }
+    }
+
+    /** Diagnostics for the host's `onNotice`: callback exceptions do not change delivery. */
+    private fun notice(kind: NoticeKind, message: String, count: Int? = null, reason: String? = null) {
+        val handler = configuration.onNotice ?: return
+        try { handler(Notice(kind, message, count, reason)) } catch (_: Throwable) { platform.logDebug("onNotice callback threw") }
     }
 
     private fun cancelTimer() {
@@ -552,8 +672,11 @@ public class TranthorSDK private constructor(
         notify(BatchFailure(DeliveryFailure(null, "Queue capacity exceeded; oldest queued events dropped"), events, 0))
     }
 
+    /** The result of one request: a failure, or the notes of a 2xx (never both). */
+    private class Sent(val failure: DeliveryFailure?, val notes: ResponseNotes?)
+
     /** Sends on an I/O thread; never throws CancellationException, so a received 2xx is always acknowledged. */
-    private suspend fun guardedSend(cycleScope: CoroutineScope, cycleJob: Job, batch: List<QueueItem>): DeliveryFailure? {
+    private suspend fun guardedSend(cycleScope: CoroutineScope, cycleJob: Job, request: BatchRequest): Sent {
         val abort = AbortHandle()
         val watcher = cycleScope.launch(start = CoroutineStart.UNDISPATCHED) {
             try {
@@ -572,12 +695,11 @@ public class TranthorSDK private constructor(
             withContext(NonCancellable) {
                 withContext(Dispatchers.IO) {
                     try {
-                        transport.send(batch, abort)
-                        null
+                        Sent(null, transport.send(request, abort))
                     } catch (failure: DeliveryFailure) {
-                        failure
+                        Sent(failure, null)
                     } catch (_: Exception) {
-                        DeliveryFailure(null, "Network delivery failure")
+                        Sent(DeliveryFailure(null, "Network delivery failure"), null)
                     }
                 }
             }
@@ -591,26 +713,233 @@ public class TranthorSDK private constructor(
         for (waiter in waiters) if (waiter.failure == null) waiter.failure = failure
     }
 
-    /** How one batch's attempts ended: acknowledged, a terminal failure, or neither (interrupted). */
-    private class Outcome(val acknowledged: Boolean, val terminal: DeliveryFailure?, val attempts: Int)
+    /** A batch kept at the head of the queue for [ms]; [failure] is what an explicit flush waiting on it reports. */
+    private class Hold(val ms: Long, val failure: DeliveryFailure)
+
+    /** How one batch's attempts ended: acknowledged, a terminal failure, held, or none of these (interrupted). */
+    private class Outcome(val acknowledged: Boolean, val terminal: DeliveryFailure?, val attempts: Int, val hold: Hold? = null)
+
+    private fun endHold() {
+        held = false
+        currentHold = null
+        holdTimer?.cancel(); holdTimer = null
+    }
+
+    private fun startHold(hold: Hold) {
+        held = true
+        currentHold = hold
+        holdTimer?.cancel()
+        holdTimer = scope.launch {
+            try { sleep(hold.ms.toDouble()) } catch (_: CancellationException) { return@launch }
+            holdTimer = null
+            currentHold = null
+            held = false
+            beginCycle()
+        }
+    }
+
+    /** Retries a parked opt-out removal after [ms], on the same timer length as the other holds. */
+    private fun startRemovalRetry(ms: Long) {
+        removalTimer?.cancel()
+        removalTimer = scope.launch {
+            try { sleep(ms.toDouble()) } catch (_: CancellationException) { return@launch }
+            removalTimer = null
+            triggerRemovals()
+        }
+    }
 
     /**
-     * Sends [batch] with the configured retries and backoff. Opt-out interrupts ordinary batches but not
-     * opt-out removals ([interruptedByOptOut] false), which are the only thing sent while opted out.
+     * Asks the host's provider for [userId]'s token and waits at most the provider timeout. The provider runs
+     * off this executor; any throw (including a CancellationException from it), a timeout or an empty answer
+     * is a failure that keeps the provider unused for the backoff, and a late answer is discarded.
      */
-    private suspend fun sendWithRetries(
-        cycleScope: CoroutineScope, job: Job, batch: List<QueueItem>, interruptedByOptOut: Boolean,
-    ): Outcome {
-        fun interrupted() = job.isCancelled || stopped || (interruptedByOptOut && state.optedOut)
-        for (attempt in 0..configuration.retries) {
-            if (job.isCancelled) break
+    private suspend fun renew(userId: String): Boolean {
+        val provider = configuration.identityTokenProvider ?: return false
+        if (platform.currentTimeMs() < providerBackoffUntilMs) return false
+        // A blocking provider (see IdentityTokenSupplier) is abandoned at the timeout but its thread runs on: no second
+        // call starts until it returns, so abandoned calls cannot pile up one per backoff window.
+        if (providerWorker?.isCompleted == false) {
+            providerBackoffUntilMs = platform.currentTimeMs() + timings.providerBackoffMs
+            return false
+        }
+        val answer = CompletableDeferred<String?>()
+        val worker = providerScope.launch {
+            try { answer.complete(provider(userId)) } catch (_: Throwable) { answer.complete(null) }
+        }
+        providerWorker = worker
+        val timer = scope.launch {
+            try { sleep(timings.providerTimeoutMs.toDouble()) } catch (_: CancellationException) { return@launch }
+            answer.complete(null)
+        }
+        val token = try { answer.await() } finally { timer.cancel(); worker.cancel() }
+        if (!token.isNullOrEmpty()) {
+            state.tokens.set(userId, token)
+            // The call suspended: a user who is no longer current and has nothing queued does not need the token.
+            pruneTokens()
+            if (state.tokens.get(userId) == null) return false
+            persistDeliveryState()
+            return true
+        }
+        providerBackoffUntilMs = platform.currentTimeMs() + timings.providerBackoffMs
+        return false
+    }
+
+    /**
+     * Before the first attempt: renew the token of the current user in the batch (of every user, for an opt-out
+     * removal, whose user may no longer be current) when it has less than 60 s left. Whatever happens the batch
+     * is then sent with the tokens we have: the server decides, so a failing provider never keeps data back.
+     * Returns the users whose token the provider just supplied.
+     */
+    private suspend fun renewBeforeSending(batch: List<QueueItem>, removals: Boolean): MutableSet<String> {
+        val renewed = HashSet<String>()
+        if (configuration.identityTokenProvider == null) return renewed
+        val users = distinctUsers(batch)
+        val targets = if (removals) users else listOfNotNull(currentUser()?.takeIf { it in users })
+        for (user in targets) {
+            if (state.tokens.getFresh(user, platform.currentTimeMs(), RENEW_BELOW_MS) == null && renew(user)) renewed.add(user)
+        }
+        return renewed
+    }
+
+    /** One token per user in [batch] that has one, in the order the users first appear. Expired by up to 2 minutes still counts. */
+    private fun tokensFor(batch: List<QueueItem>): List<String> {
+        val now = platform.currentTimeMs()
+        return distinctUsers(batch).mapNotNull { state.tokens.getFresh(it, now, -TOKEN_ACCEPTED_AFTER_EXPIRY_MS) }
+    }
+
+    /** The server dropped or could not verify events it accepted: say so once, without any token or user id. */
+    private fun reportResponseNotes(notes: ResponseNotes?) {
+        if (notes == null || notes.isEmpty) return
+        val advice = "With identity verification required, register push and identify the user with an identity token after sign-in."
+        if (notes.droppedEvents > 0) {
+            // The count also covers events dropped for being oversized, in every mode: the wording stays neutral.
+            notice(NoticeKind.EVENTS_DROPPED, "The server dropped ${notes.droppedEvents} event(s). In Required mode this includes anonymous events that could change a customer. $advice", count = notes.droppedEvents)
+        }
+        if (notes.unverifiedEvents > 0) {
+            notice(NoticeKind.EVENTS_UNVERIFIED, "The server accepted ${notes.unverifiedEvents} event(s) it could not verify. $advice", count = notes.unverifiedEvents)
+        }
+    }
+
+    /**
+     * Removes a user's items from the batch in flight (a previous user's, whom no token can be renewed for, or every
+     * user's when identity was never used) and reports them once through `onError`; the rest of the batch is sent.
+     */
+    private fun dropUser(user: String, refusal: DeliveryFailure) {
+        // A sign-out `Installation Removed` is never dropped for lack of a token: it stays, parked by the hold.
+        val items = store.queue.activeItems.filter { userIdOf(it) == user && !isInstallationRemoval(it) }
+        if (items.isEmpty()) return
+        val attempts = items.maxOf { sendCounts[it] ?: 0 }
+        store.queue.removeFromActive(items)
+        for (item in items) sendCounts.remove(item)
+        pruneTokens()
+        persistDeliveryState()
+        notify(BatchFailure(refusalFailure(refusal), items.map { it.value }, attempts))
+    }
+
+    private fun refusalFailure(refusal: DeliveryFailure, detail: String? = null): DeliveryFailure =
+        DeliveryFailure(403, detail ?: "identity not verified", code = IDENTITY_NOT_VERIFIED, reason = refusal.reason)
+
+    /** Reasons the SDK cannot fix by renewing: the app's own token signing is at fault. */
+    private fun unfixableByRenewing(reason: String?): Boolean =
+        reason in setOf("lifetime", "malformed", "audience", "workspace", "unknown_key", "signature")
+
+    /**
+     * Sends the batch with the configured retries and backoff, handling the identity answers on the way. The batch
+     * is [StoredState.active], or the opt-out removals when [removals]; either can shrink while this runs.
+     * Opt-out interrupts ordinary batches but not removals, which are the only thing sent while opted out.
+     */
+    private suspend fun sendWithRetries(cycleScope: CoroutineScope, job: Job, removals: Boolean): Outcome {
+        fun batch(): List<QueueItem> = if (removals) state.pendingRemovals.toList() else store.queue.activeItems
+        fun interrupted() = job.isCancelled || stopped || (!removals && state.optedOut)
+        // The users whose token the provider supplied during this send: a token just obtained and refused is not renewed again.
+        val renewedThisSend = renewBeforeSending(batch(), removals)
+        var sends = 0
+        var retry = 0
+        // Set when the current user's items were split off to wait: applied once the rest of the batch is delivered.
+        var pendingHold: Hold? = null
+        while (!job.isCancelled) {
+            val current = batch()
+            if (current.isEmpty()) return Outcome(true, null, maxOf(sends, 1), pendingHold)
+            sends++
+            for (item in current) sendCounts[item] = (sendCounts[item] ?: 0) + 1
             // A 2xx acknowledges the batch even if cancellation raced with the response.
-            val failure = guardedSend(cycleScope, job, batch) ?: return Outcome(true, null, attempt + 1)
+            val sent = guardedSend(cycleScope, job, BatchRequest(current, tokensFor(current)))
+            val failure = sent.failure
+            if (failure == null) { reportResponseNotes(sent.notes); return Outcome(true, null, sends, pendingHold) }
             if (interrupted()) break
+            var retryable = failure.retryable
+            if (failure.status == 403 && failure.code == IDENTITY_NOT_VERIFIED) {
+                val users = distinctUsers(current)
+                val refused = users.filter { it in failure.userIds }.ifEmpty { users }
+                val inUse = identityInUse()
+                if (refused.isEmpty()) {
+                    // Nothing to renew, drop or hold. An app that uses identity retries with the normal backoff and says so;
+                    // one that never did keeps the old behaviour: a final 403, reported and dropped.
+                    if (inUse) {
+                        notice(NoticeKind.IDENTITY_REFUSED, "The server refused identity verification for events that have no user to renew a token for" + reasonSuffix(failure.reason),
+                            reason = failure.reason)
+                        retryable = true
+                    }
+                } else if (removals) {
+                    // An opt-out removal is never dropped for lack of a token: renew once, and if that does not help park it.
+                    for (user in refused) state.tokens.delete(user)
+                    var renewed = false
+                    for (user in refused) if (user !in renewedThisSend && renew(user)) { renewedThisSend.add(user); renewed = true }
+                    if (renewed) continue
+                    return Outcome(false, null, sends, Hold(timings.providerBackoffMs, refusalFailure(failure)))
+                } else if (!inUse && current.none(::isInstallationRemoval)) {
+                    // Identity was never used: the old behaviour for the whole batch.
+                    return Outcome(false, failure, sends)
+                } else {
+                    for (user in refused) state.tokens.delete(user)
+                    persistDeliveryState()
+                    val currentUser = currentUser()
+                    val previous = refused.filter { it != currentUser }
+                    // A sign-out removal of a previous user gets one renewal through the provider before it is kept.
+                    var renewedAny = false
+                    for (user in previous) {
+                        if (user !in renewedThisSend && current.any { userIdOf(it) == user && isInstallationRemoval(it) } && renew(user)) {
+                            renewedThisSend.add(user); renewedAny = true
+                        }
+                    }
+                    if (renewedAny) continue
+                    for (user in previous) dropUser(user, failure)
+                    var holdCurrent = false
+                    if (currentUser != null && currentUser in refused) {
+                        // A token just obtained and refused again is not renewed again in the same send.
+                        val refusedAfterRenewal = currentUser in renewedThisSend
+                        if (inUse && !refusedAfterRenewal && renew(currentUser)) { renewedThisSend.add(currentUser); continue }
+                        if (inUse) {
+                            holdCurrent = true
+                            notice(NoticeKind.IDENTITY_REFUSED, refusalMessage(failure.reason, refusedAfterRenewal), reason = failure.reason)
+                        } else dropUser(currentUser, failure)
+                    }
+                    // What stays: the current user's items waiting for a token, and every kept sign-out removal.
+                    val kept = batch().filter { (holdCurrent && userIdOf(it) == currentUser) || isInstallationRemoval(it) && userIdOf(it) in refused }
+                    if (kept.isEmpty()) continue
+                    // Each failed attempt for a previous user's removal is reported (its push token redacted), because it stays until
+                    // delivered; the current user's is a notice like any other held batch.
+                    val keptRemovals = kept.filter { isInstallationRemoval(it) && userIdOf(it) != currentUser }
+                    if (keptRemovals.isNotEmpty()) notify(BatchFailure(refusalFailure(failure), keptRemovals.map { it.value }, sends))
+                    val hold = Hold(timings.providerBackoffMs, refusalFailure(failure))
+                    // The other users' events (and anonymous ones) in this batch go first, in one request; only the kept
+                    // items wait. Events queued behind the held ones still wait for them: that limit is deliberate.
+                    if (kept.size == batch().size || pendingHold != null) return Outcome(false, null, sends, hold)
+                    store.queue.returnToHead(kept)
+                    pendingHold = hold
+                    continue
+                }
+            } else if (!removals && failure.status == 503 && failure.code in IDENTITY_UNAVAILABLE_CODES) {
+                // The server could not read its identity settings. Nothing is wrong with the batch: keep it for Retry-After.
+                val ms = if (failure.retryAfterGiven) failure.heldAfterMs.toLong().coerceIn(UNAVAILABLE_HOLD_MIN_MS, UNAVAILABLE_HOLD_MAX_MS)
+                else UNAVAILABLE_HOLD_DEFAULT_MS
+                notice(NoticeKind.IDENTITY_UNAVAILABLE, "The server could not read its identity settings; delivery is held for ${ms / 1000} s and nothing is dropped.")
+                return Outcome(false, null, sends, Hold(ms, failure))
+            }
             // A background window makes one attempt and never sleeps through a retry.
-            if (backgroundToken != null && failure.retryable) { paused = true; break }
-            if (attempt >= configuration.retries || !failure.retryable) return Outcome(false, failure, attempt + 1)
-            val delayMs = retryDelay(configuration.baseDelay, attempt, failure.retryAfterMs)
+            if (backgroundToken != null && retryable) { paused = true; break }
+            if (retry >= configuration.retries || !retryable) return Outcome(false, failure, sends)
+            val delayMs = retryDelay(configuration.baseDelay, retry, failure.retryAfterMs)
             val pending = scope.launch { sleep(delayMs) }
             backoff = pending
             var wasInterrupted = false
@@ -622,8 +951,19 @@ public class TranthorSDK private constructor(
                 if (interrupted() || backgroundToken == null) break
             }
             backoff = null
+            retry++
         }
         return Outcome(false, null, 0)
+    }
+
+    private fun reasonSuffix(reason: String?): String = reason?.let { " (reason: $it)" } ?: ""
+
+    /** Never contains a token or a user id. Names the app's signing code when renewing cannot help. */
+    private fun refusalMessage(reason: String?, refusedAfterRenewal: Boolean): String = when {
+        refusedAfterRenewal && unfixableByRenewing(reason) ->
+            "The server refused the identity token the provider supplied${reasonSuffix(reason)}; renewing cannot fix this, check the app's token signing. The batch is held."
+        refusedAfterRenewal -> "The server refused the identity token the provider supplied${reasonSuffix(reason)}. The batch is held."
+        else -> "No identity token could be obtained for the current user${reasonSuffix(reason)}. The batch is held."
     }
 
     /**
@@ -634,7 +974,17 @@ public class TranthorSDK private constructor(
         while (state.pendingRemovals.isNotEmpty() && !job.isCancelled && !stopped && !paused) {
             val batch = state.pendingRemovals.toList()
             val triggers = removalTriggers
-            val outcome = sendWithRetries(cycleScope, job, batch, interruptedByOptOut = false)
+            val outcome = sendWithRetries(cycleScope, job, removals = true)
+            val hold = outcome.hold
+            if (hold != null) {
+                // Refused and one renewal did not fix it: the removal stays (the phone must stop receiving push), each failed
+                // attempt is reported, and it is retried on the hold timer and at the next launch.
+                notify(BatchFailure(hold.failure, batch.map { it.value }, outcome.attempts))
+                removalParked = hold.failure
+                failWaiters(hold.failure)
+                startRemovalRetry(hold.ms)
+                return false
+            }
             val terminal = outcome.terminal
             // A retryable failure (offline, 429, 5xx) after the configured retries keeps the removal but parks it
             // until the next trigger. An interrupted cycle (cancelled, background) does not park it.
@@ -651,6 +1001,7 @@ public class TranthorSDK private constructor(
             // of it once. The removal carries the push token, which stays out of the callback.
             if (terminal != null) notify(BatchFailure(terminal, batch.map { it.value }, outcome.attempts))
             state.pendingRemovals.removeAll { sent -> batch.any { it === sent } }
+            pruneTokens()
             persistDeliveryState()
         }
         return state.pendingRemovals.isEmpty()
@@ -662,9 +1013,12 @@ public class TranthorSDK private constructor(
         try {
             if (!deliverRemovals(cycleScope, job)) return
             store.queue.retryPendingDeletions()
-            while (store.queue.hasQueued && !job.isCancelled && !stopped && !state.optedOut) {
-                val batch = store.queue.takeBatch(configuration.batchSize)
-                val outcome = sendWithRetries(cycleScope, job, batch, interruptedByOptOut = true)
+            while (store.queue.hasQueued && !job.isCancelled && !stopped && !state.optedOut && !held) {
+                // Tokens for at most 10 users go in one request; without identity in use batching is unchanged.
+                store.queue.takeBatch(configuration.batchSize, if (identityInUse()) ::takeCount else null)
+                val outcome = sendWithRetries(cycleScope, job, removals = false)
+                // Items a refusal removed from the batch are already reported; this is what is left.
+                val batch = store.queue.activeItems
                 val acknowledged = outcome.acknowledged
                 val terminal = outcome.terminal
                 if (terminal != null) {
@@ -674,7 +1028,19 @@ public class TranthorSDK private constructor(
                     failWaiters(terminal)
                 }
                 if (acknowledged) exhaustionPause.reset()
-                if (acknowledged || terminal?.retryable == false) store.queue.completeBatch()
+                if (acknowledged || terminal?.retryable == false) {
+                    for (item in batch) sendCounts.remove(item)
+                    store.queue.completeBatch()
+                    pruneTokens()
+                    persistDeliveryState()
+                }
+                val hold = outcome.hold
+                if (hold != null && !job.isCancelled && !stopped && !state.optedOut) {
+                    // What is left of the batch goes back to the head of the queue, and nothing is sent until the hold ends.
+                    startHold(hold)
+                    failWaiters(hold.failure)
+                    break
+                }
                 // Never advance to another batch while this one remains unacknowledged.
                 if (!acknowledged && terminal == null) break
                 if (job.isCancelled || stopped || state.optedOut || paused) break
@@ -750,7 +1116,8 @@ public class TranthorSDK private constructor(
                 }
             }
         } ?: return
-        try { flush() } catch (error: Exception) { if (error is CancellationException) throw error }
+        // A held batch is not retried by a lifecycle flush; only an explicit flush ends the hold.
+        try { beginFlush(endsHold = false)?.await() } catch (error: Exception) { if (error is CancellationException) throw error }
         withContext(dispatcher) {
             if (backgroundToken == token) backgroundToken = null
             if (lifecycleToken == token) lifecycleToken = null
@@ -758,9 +1125,11 @@ public class TranthorSDK private constructor(
     }
 
     /** Registers a flush waiter in admission order without awaiting delivery (Java facade). */
-    internal suspend fun beginFlush(): CompletableDeferred<Unit>? = withContext(dispatcher) {
+    internal suspend fun beginFlush(endsHold: Boolean = true): CompletableDeferred<Unit>? = withContext(dispatcher) {
         if (stopped) throw TranthorException.Stopped()
         if (state.optedOut) return@withContext null
+        // An explicit flush ends a hold and tries again at once; a flush the SDK makes itself does not.
+        if (held) { if (endsHold) endHold() else return@withContext null }
         emitDropped()
         paused = false
         store.queue.retryPendingDeletions()
@@ -774,6 +1143,8 @@ public class TranthorSDK private constructor(
 
     private suspend fun start(removed: List<Map<String, JsonValue>>) = withContext(dispatcher) {
         reportDropped(removed)
+        // An app that never calls identify has no stored user: the first user in the restored queue is the current one.
+        if (state.userId.isNullOrEmpty()) notedUser = store.queue.queuedItems.firstNotNullOfOrNull { userIdOf(it) }
         // A later Registered must stay strictly after a stored removal even if the clock went back.
         state.pendingRemovals.mapNotNull { item -> item.value["timestamp"]?.stringValue?.let(::parseTimestamp) }.maxOrNull()
             ?.let { installationClockMs = maxOf(installationClockMs, it) }
@@ -800,9 +1171,13 @@ public class TranthorSDK private constructor(
             storeRead: ((java.io.File) -> ByteArray?)? = null,
             storeDelete: ((java.io.File) -> Unit)? = null,
             totalRequestTimeoutMs: Long = 60_000,
+            identityTimings: IdentityTimings = IdentityTimings(),
         ): TranthorSDK {
             val endpoint = endpointFor(configuration.host)
-            val sender = transport ?: HttpTransport(endpoint, configuration.writeKey)
+            // An id the developer chose is sent as it is or configuration fails; only the default is the package name.
+            configuration.appId?.let { if (!isValidAppId(it)) throw TranthorException.InvalidAppId() }
+            val appId = configuration.appId ?: platform.packageName.takeIf { isValidAppId(it) }
+            val sender = transport ?: HttpTransport(endpoint, configuration.writeKey, appId)
             val base = configuration.storageDirectory ?: platform.defaultStorageDirectory()
             val lease = NamespaceRegistry.acquire(base, configuration.storageNamespace)
             val loaded = try {
@@ -820,6 +1195,8 @@ public class TranthorSDK private constructor(
                     if (store.interruptedOptOut) restored.installation?.takeIf { restored.userId != null }?.let {
                         restored.pendingRemovals.add(optOutRemoval(restored, it, timestamp(platform.currentTimeMs())))
                     }
+                    // A token whose user has nothing left to send and is not the stored user is stale.
+                    restored.pruneTokens(store.queue, platform.currentTimeMs(), restored.userId.takeIf { !restored.optedOut })
                     val removed = ArrayList<Map<String, JsonValue>>()
                     store.queue.trim(configuration.maxQueueSize).mapTo(removed) { it.value }
                     // Persist fail-closed consent recovery independently of routine state writes.
@@ -836,7 +1213,7 @@ public class TranthorSDK private constructor(
                 }
             }
             val sdk = TranthorSDK(configuration, sender, sleep, lease, loaded.first, loaded.second,
-                if (configuration.automaticContext) platform.automaticContext() else emptyMap(), platform, totalRequestTimeoutMs)
+                if (configuration.automaticContext) platform.automaticContext() else emptyMap(), platform, totalRequestTimeoutMs, identityTimings)
             sdk.lifecycleDisposer = try { platform.installLifecycle(sdk) } catch (error: Exception) {
                 if (error is CancellationException) { sdk.shutdown(); throw error }
                 platform.logDebug("Lifecycle hooks unavailable"); null

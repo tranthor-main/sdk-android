@@ -1,6 +1,7 @@
 package com.tranthor.sdk.conformance
 
 import com.tranthor.sdk.Configuration
+import com.tranthor.sdk.IdentityTimings
 import com.tranthor.sdk.JvmPlatform
 import com.tranthor.sdk.TranthorSDK
 import java.io.File
@@ -11,14 +12,14 @@ import org.junit.Test
 
 /**
  * JVM host adapter: the real SDK queue, HttpURLConnection transport and persistence (temp+rename
- * atomic files) against the Node mock. Declares core/transport/persistence/consent/identity-link/durable-queue and honestly
- * omits lifecycle: a plain JVM has no ProcessLifecycleOwner.
+ * atomic files) against the Node mock. Declares core/transport/persistence/consent/identity-link/durable-queue/identity-token/app-id and
+ * honestly omits lifecycle: a plain JVM has no ProcessLifecycleOwner.
  * Run with scripts/test-host.sh (Gradle property tranthor.conformance).
  */
 class JvmConformanceTest {
     private class JvmEnvironment(private val results: File?) : ConformanceEnvironment {
         override val adapterName = "TranthorSDK Android JVM host"
-        override val capabilities = listOf("core", "transport", "persistence", "consent", "identity-link", "durable-queue")
+        override val capabilities = listOf("core", "transport", "persistence", "consent", "identity-link", "durable-queue", "identity-token", "app-id")
         override val lifecycleSource: String? = null
         private val loader = JvmConformanceTest::class.java.classLoader!!
         override fun readText(path: String): String =
@@ -28,7 +29,8 @@ class JvmConformanceTest {
             return File(url.toURI()).parentFile!!.list { _, name -> name.endsWith(".json") }!!.toList()
         }
         override fun temporaryDirectory(): File = File(System.getProperty("java.io.tmpdir")!!)
-        override suspend fun makeSdk(configuration: Configuration): TranthorSDK = TranthorSDK.create(configuration, JvmPlatform())
+        override suspend fun makeSdk(configuration: Configuration, timings: IdentityTimings): TranthorSDK =
+            TranthorSDK.create(configuration, JvmPlatform(), identityTimings = timings)
         override suspend fun background() = throw CheckFailure("No lifecycle on the JVM host")
         override fun emit(line: String) {
             println(line)

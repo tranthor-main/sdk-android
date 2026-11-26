@@ -52,6 +52,11 @@ public class TranthorClient private constructor(public val sdk: TranthorSDK) {
     public fun identify(userId: String?, traits: Map<String, *>? = null, callback: TranthorCallback<Unit>? = null): Unit =
         submit(callback) { sdk.identify(userId = userId, traits = traits?.let(JsonValue::objectOf)) }
 
+    /** [identify] with the signed-in user's identity token (see [Configuration.identityTokenProvider]). */
+    @JvmOverloads
+    public fun identify(userId: String?, traits: Map<String, *>?, identityToken: String, callback: TranthorCallback<Unit>? = null): Unit =
+        submit(callback) { sdk.identify(userId = userId, traits = traits?.let(JsonValue::objectOf), identityToken = identityToken) }
+
     @JvmOverloads
     public fun track(event: String, properties: Map<String, *>? = null, callback: TranthorCallback<Unit>? = null): Unit =
         submit(callback) { sdk.track(event = event, properties = properties?.let(JsonValue::objectOf)) }

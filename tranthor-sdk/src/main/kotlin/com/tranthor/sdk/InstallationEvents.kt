@@ -98,7 +98,7 @@ internal fun trimQueue(queue: ArrayDeque<QueueItem>, capacity: Int): List<QueueI
 }
 
 /** The (appId, token) of an Installation event, or null for an ordinary event. */
-private fun installationTarget(item: QueueItem): Pair<String?, String?>? {
+internal fun installationTarget(item: QueueItem): Pair<String?, String?>? {
     val value = item.value
     if (value["type"]?.stringValue != "track") return null
     val event = value["event"]?.stringValue
@@ -106,3 +106,7 @@ private fun installationTarget(item: QueueItem): Pair<String?, String?>? {
     val properties = value["properties"]?.objectValue ?: return null
     return properties["appId"]?.stringValue to properties["token"]?.stringValue
 }
+
+/** Whether [item] is an `Installation Removed` event. */
+internal fun isInstallationRemoval(item: QueueItem): Boolean =
+    item.value["type"]?.stringValue == "track" && item.value["event"]?.stringValue == INSTALLATION_REMOVED

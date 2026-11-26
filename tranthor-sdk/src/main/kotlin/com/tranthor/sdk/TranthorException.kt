@@ -15,6 +15,9 @@ public sealed class TranthorException(message: String, cause: Throwable? = null)
     /** The host is not an absolute HTTP(S) origin. */
     public class InvalidHost : TranthorException("Invalid host")
 
+    /** [Configuration.appId] cannot be sent as an HTTP header value. */
+    public class InvalidAppId : TranthorException("Invalid appId: it must be non-empty printable ASCII without surrounding spaces. Pass null to send the package name.")
+
     /** The payload contained a value that cannot be serialized as JSON (for example NaN). */
     public class InvalidPayload(message: String) : TranthorException(message)
 

@@ -2,7 +2,9 @@ package com.tranthor.sdk.conformance
 
 import com.tranthor.sdk.BatchFailure
 import com.tranthor.sdk.Configuration
+import com.tranthor.sdk.IdentityTimings
 import com.tranthor.sdk.JsonValue
+import com.tranthor.sdk.Notice
 import com.tranthor.sdk.TranthorSDK
 import java.io.File
 import java.net.HttpURLConnection
@@ -10,6 +12,7 @@ import java.net.URL
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -22,7 +25,7 @@ internal interface ConformanceEnvironment {
     fun readText(path: String): String
     fun scenarioFiles(): List<String>
     fun temporaryDirectory(): File
-    suspend fun makeSdk(configuration: Configuration): TranthorSDK
+    suspend fun makeSdk(configuration: Configuration, timings: IdentityTimings): TranthorSDK
     /** Called before the SDK is created for each executed scenario. */
     suspend fun prepare(scenario: J) {}
     /** Delivers the real OS lifecycle signal (os-hook) and awaits it. */
@@ -36,6 +39,13 @@ internal class ErrorLog {
     private val entries = ArrayList<BatchFailure>()
     @Synchronized fun append(failure: BatchFailure) { entries.add(failure) }
     @Synchronized fun snapshot(): List<BatchFailure> = ArrayList(entries)
+}
+
+/** Diagnostic notices, which are not errors: kept apart from [ErrorLog] and compared against `expect.notices`. */
+internal class NoticeLog {
+    private val entries = ArrayList<Notice>()
+    @Synchronized fun append(notice: Notice) { entries.add(notice) }
+    @Synchronized fun snapshot(): List<Notice> = ArrayList(entries)
 }
 
 /** [storedAnonymousId] is the SDK's stored anonymousId read right after the call (identity-link only). */
@@ -119,6 +129,7 @@ internal class ScenarioRunner(
 ) {
     private val directory = File(environment.temporaryDirectory(), "tranthor-conformance-" + UUID.randomUUID())
     private val errors = ErrorLog()
+    private val notices = NoticeLog()
     private var sdk: TranthorSDK? = null
     private val calls = HashMap<String, Call>()
     private val operations = HashMap<String, Operation>()
@@ -126,6 +137,34 @@ internal class ScenarioRunner(
     private val linking = environment.capabilities.contains("identity-link")
     private val anonymousIdRefs = HashMap<String, String>()
     private var offset = 0.0
+    // Identity tokens are minted by the mock at the moment they are needed, so their expiry is relative to now.
+    private val tokens = HashMap<String, String>()
+    private val providerCalls = ArrayList<String>()
+    // The scripted provider belongs to the scenario, not to the SDK instance, so a restart keeps its position.
+    private val providerScript = ArrayDeque(scenario["config"]?.get("identity")?.get("provider")?.arrayValue ?: emptyList())
+
+    private suspend fun mint(spec: J): String {
+        val body = linkedMapOf("sub" to spec["sub"]!!, "ttlSeconds" to spec["ttlSeconds"]!!)
+        spec["valid"]?.let { body["valid"] = it }
+        val token = http("/control/identity/token", JsonValue.ObjectValue(body))["token"]?.stringValue ?: throw CheckFailure("Mock did not mint a token")
+        tokens[spec["ref"]?.stringValue ?: throw CheckFailure("Token without ref")] = token
+        return token
+    }
+
+    /** One scripted outcome per call, in order; once the script is spent it answers null. */
+    private suspend fun scriptedProvider(userId: String): String? {
+        val outcome = synchronized(providerCalls) {
+            providerCalls.add(userId)
+            providerScript.removeFirstOrNull()
+        } ?: obj("result" to str("null"))
+        outcome["delayMs"]?.numberValue?.takeIf { it > 0 }?.let { delay(it.toLong()) }
+        return when (outcome["result"]?.stringValue) {
+            "hang" -> awaitCancellation()
+            "error" -> throw IllegalStateException("identity provider failed")
+            "token" -> mint(outcome)
+            else -> null
+        }
+    }
 
     /** One ref names one stored anonymousId; distinct refs must hold distinct values. */
     private fun bindAnonymousId(ref: String, value: String?, label: String) {
@@ -174,6 +213,12 @@ internal class ScenarioRunner(
             storageNamespace = "scenario",
             storageDirectory = directory,
             onError = { log.append(it) },
+            onNotice = { notices.append(it) },
+            identityTokenProvider = if (config["identity"] != null) ::scriptedProvider else null,
+            appId = config["appId"]?.stringValue,
+        ), IdentityTimings(
+            providerTimeoutMs = config["identity"]?.get("providerTimeoutMs")?.numberValue?.toLong() ?: 20_000,
+            providerBackoffMs = config["identity"]?.get("providerBackoffMs")?.numberValue?.toLong() ?: 60_000,
         ))
     }
 
@@ -189,7 +234,9 @@ internal class ScenarioRunner(
                 samples.add(server - (before + after) / 2)
             }
             offset = samples.sorted()[1]
-            http("/control/script", scenario["server"])
+            // The script takes `responses` only; the identity mode is a separate control call.
+            http("/control/script", obj("responses" to (scenario["server"]?.get("responses") ?: arr(emptyList()))))
+            scenario["server"]?.get("identity")?.get("mode")?.let { http("/control/identity", obj("mode" to it)) }
             sdk = makeSdk()
             for (step in scenario["steps"]?.arrayValue ?: emptyList()) execute(step)
         } catch (error: Throwable) {
@@ -223,15 +270,18 @@ internal class ScenarioRunner(
                 val time = data["timestamp"]?.stringValue
                 val context = data["context"]?.objectValue
                 val properties = data["properties"]?.objectValue
+                // A token is minted first and handed to identify beside the data, never inside it.
+                val identityToken = step["identityToken"]?.let { mint(it) }
+                val callBefore = now()
                 when (method) {
-                    "identify" -> current.identify(user, anonymous, data["traits"]?.objectValue, id, time, context)
+                    "identify" -> current.identify(user, anonymous, data["traits"]?.objectValue, id, time, context, identityToken)
                     "track" -> current.track(data["event"]?.stringValue ?: "", user, anonymous, properties, data["files"]?.arrayValue, id, time, context)
                     "page" -> current.page(data["name"]?.stringValue, user, anonymous, properties, id, time, context)
                     "screen" -> current.screen(data["name"]?.stringValue, user, anonymous, properties, id, time, context)
                     else -> throw CheckFailure("Unknown method")
                 }
                 val after = now()
-                calls[step["call"]?.stringValue ?: ""] = Call(method, data, before, after, if (linking) current.anonymousId else null)
+                calls[step["call"]?.stringValue ?: ""] = Call(method, data, callBefore, after, if (linking) current.anonymousId else null)
             }
             "wait" -> delay((step["ms"]?.numberValue ?: 0.0).toLong())
             "flush" -> {
@@ -270,13 +320,20 @@ internal class ScenarioRunner(
         while (now() < deadline) {
             val records = requests()
             val callbacks = errors.snapshot()
-            if (records.size >= expectedRequests.size && callbacks.size >= expectedErrors.size) break
+            if (records.size >= expectedRequests.size && callbacks.size >= expectedErrors.size &&
+                notices.snapshot().size >= (expect["notices"]?.arrayValue?.size ?: 0)) break
             delay(10)
         }
         delay((step["observeMs"]?.numberValue ?: 100.0).toLong())
         val records = requests()
         val callbacks = errors.snapshot()
         for (record in records) validateEnvelope(record["body"])
+        // A token travels only in `identityTokens`: never inside an event or an error report.
+        for (record in records) for (item in record["body"]?.get("batch")?.arrayValue ?: emptyList()) {
+            require(item["identityToken"] == null, "An item carries identityToken")
+            val text = item.toJson()
+            for (token in tokens.values) require(!text.contains(token), "An identity token is inside an event")
+        }
         require(records.size == expectedRequests.size, "Request count ${records.size}, expected ${expectedRequests.size}")
         require(callbacks.size == expectedErrors.size, "Error count ${callbacks.size}, expected ${expectedErrors.size}")
         val wire = HashMap<String, J>()
@@ -293,6 +350,12 @@ internal class ScenarioRunner(
                 }
             }
             expected["context"]?.let { subset(it, record["body"]?.get("context"), "batch context") }
+            // Tokens are named by ref; an absent field and an empty list both mean no token.
+            expected["identityTokens"]?.arrayValue?.let { refs ->
+                val wanted = refs.map { tokens[it.stringValue ?: ""] ?: throw CheckFailure("Token ${it.stringValue} was never minted") }
+                val actual = record["body"]?.get("identityTokens")?.arrayValue?.map { it.stringValue } ?: emptyList()
+                require(actual == wanted, "Request $index identityTokens: expected refs ${refs.map { it.stringValue }}, got ${actual.map { token -> tokens.entries.firstOrNull { it.value == token }?.key ?: "<unknown>" }}")
+            }
             val batch = record["body"]?.get("batch")?.arrayValue ?: emptyList()
             val items = expected["batch"]?.arrayValue ?: emptyList()
             require(batch.size == items.size, "Batch count request $index")
@@ -319,6 +382,28 @@ internal class ScenarioRunner(
                 checkStamp(actual, call, label)
                 wire[label] = actual
             }
+        }
+        for (error in callbacks) for (event in error.events) {
+            val text = JsonValue.ObjectValue(event).toJson()
+            for (token in tokens.values) require(!text.contains(token), "An identity token is inside an error event")
+        }
+        for (notice in notices.snapshot()) {
+            for (token in tokens.values) require(!notice.message.contains(token), "An identity token is inside a notice")
+        }
+        expect["notices"]?.arrayValue?.let { wanted ->
+            // Notices are not errors: an ordered list of { kind, count?, reason? }, each listed field compared.
+            val actual = notices.snapshot()
+            require(actual.size == wanted.size, "Notice count ${actual.size}, expected ${wanted.size}: ${actual.map { it.kind }}")
+            wanted.forEachIndexed { index, expected ->
+                val notice = actual[index]
+                require(expected["kind"]?.stringValue == notice.kind.name.lowercase().replace('_', '-'), "Notice $index kind ${notice.kind}")
+                expected["count"]?.numberValue?.let { require(notice.count?.toDouble() == it, "Notice $index count ${notice.count}") }
+                expected["reason"]?.stringValue?.let { require(notice.reason == it, "Notice $index reason ${notice.reason}") }
+            }
+        }
+        expect["providerCalls"]?.arrayValue?.let { wanted ->
+            val actual = synchronized(providerCalls) { ArrayList(providerCalls) }
+            require(actual == wanted.map { it.stringValue }, "Provider calls $actual, expected ${wanted.map { it.stringValue }}")
         }
         expectedErrors.forEachIndexed { index, expected ->
             val error = callbacks[index]
