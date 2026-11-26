@@ -730,6 +730,54 @@ class IdentityTokenTest {
 
     // ---- identity in use (R1) ----
 
+    @Test fun aDamagedStateFileKeepsIdentityInUse() {
+        val bytes = """{"version":99,"anonymousId":"${java.util.UUID.randomUUID()}","userId":"u1","identityTokenSupplied":true,"queued":5}""".toByteArray()
+        assertTrue(StoredState.salvageIdentity(bytes).identityTokenSupplied)
+        assertFalse(StoredState.salvageIdentity("""{"version":99,"anonymousId":"${java.util.UUID.randomUUID()}"}""".toByteArray()).identityTokenSupplied)
+    }
+
+    @Test fun aFailedWriteWhileSupersedingAParkedRemovalLeavesItParked() = runBlocking {
+        val sleeper = ManualSleeper()
+        var stateWrites = 0
+        var failStateWrite = -1
+        val sdk = configureJvm(Configuration("Basic k==", host = server.url, batchSize = 100, flushIntervalMs = 61_000, retries = 0, baseDelay = 10,
+            storageNamespace = "supersede-fails", storageDirectory = root, identityTokenProvider = { null }, onError = { errors.append(it) }),
+            sleeper = sleeper, storeWrite = { bytes, file ->
+                if (file.name == "state.json" && ++stateWrites == failStateWrite) throw java.io.IOException("disk full")
+                TempRenameFileIo.write(file, bytes)
+            })
+        sdk.identify("u1", identityToken = valid("u1"))
+        sdk.registerInstallation("fcm-token-1", "com.example", InstallationPermission.GRANTED)
+        sdk.flush()
+        requests.clear()
+        respond = { _, _ -> refusal(listOf("u1"), "missing") }
+        sdk.optOut()
+        waitUntil { errors.snapshot().size == 1 } // parked
+        val sent = requests.size
+        val retryTimer = sleeper.wait(60_000.0) // the 60 s retry of the parked removal
+        failStateWrite = stateWrites + 2 // optIn: consent and state first, then the state write that supersedes the removal
+        assertThrows(TranthorException.StoreTemporarilyUnavailable::class.java) { runBlocking { sdk.optIn() } }
+        // The removal is back and still parked: its retry timer runs again (the superseding had cancelled it).
+        sleeper.waitCancellation(retryTimer)
+        assertTrue(sleeper.wait(60_000.0) != retryTimer)
+        assertEquals("not sent again", sent, requests.size)
+        assertEquals(1, stored("supersede-fails").pendingRemovals.size)
+        sdk.shutdown()
+    }
+
+    @Test fun theJavaIdentifyWithATokenHasItsOwnNameAndAcceptsANullToken() = runBlocking {
+        val sdk = sdk(namespace = "java-identify")
+        val client = TranthorClient::class.java.getDeclaredConstructor(TranthorSDK::class.java).apply { isAccessible = true }.newInstance(sdk)
+        // `identify(id, traits, null)` stays unambiguous for Java callers of the 0.2.x overload with a callback.
+        assertTrue(TranthorClient::class.java.methods.none { it.name == "identify" && it.parameterTypes.contentEquals(arrayOf(String::class.java, Map::class.java, String::class.java)) })
+        val method = TranthorClient::class.java.getMethod("identifyWithIdentityToken", String::class.java, Map::class.java, String::class.java, TranthorCallback::class.java)
+        val done = java.util.concurrent.CompletableFuture<Throwable?>()
+        method.invoke(client, "u1", null, null, TranthorCallback<Unit> { _, error -> done.complete(error) })
+        assertNull(done.get(5, java.util.concurrent.TimeUnit.SECONDS))
+        assertEquals("u1", sdk.userId)
+        sdk.shutdown()
+    }
+
     @Test fun anAppWithNoProviderThatPassesTokensThroughIdentifyKeepsHoldingAfterTheRefusalDeletedTheToken() = runBlocking {
         val sleeper = ManualSleeper()
         respond = { _, _ -> refusal(listOf("u1"), "expired") }

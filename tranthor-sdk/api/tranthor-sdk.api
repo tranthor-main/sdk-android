@@ -217,10 +217,10 @@ public final class com/tranthor/sdk/TranthorClient {
 	public final fun identify (Ljava/lang/String;)V
 	public final fun identify (Ljava/lang/String;Ljava/util/Map;)V
 	public final fun identify (Ljava/lang/String;Ljava/util/Map;Lcom/tranthor/sdk/TranthorCallback;)V
-	public final fun identify (Ljava/lang/String;Ljava/util/Map;Ljava/lang/String;)V
-	public final fun identify (Ljava/lang/String;Ljava/util/Map;Ljava/lang/String;Lcom/tranthor/sdk/TranthorCallback;)V
 	public static synthetic fun identify$default (Lcom/tranthor/sdk/TranthorClient;Ljava/lang/String;Ljava/util/Map;Lcom/tranthor/sdk/TranthorCallback;ILjava/lang/Object;)V
-	public static synthetic fun identify$default (Lcom/tranthor/sdk/TranthorClient;Ljava/lang/String;Ljava/util/Map;Ljava/lang/String;Lcom/tranthor/sdk/TranthorCallback;ILjava/lang/Object;)V
+	public final fun identifyWithIdentityToken (Ljava/lang/String;Ljava/util/Map;Ljava/lang/String;)V
+	public final fun identifyWithIdentityToken (Ljava/lang/String;Ljava/util/Map;Ljava/lang/String;Lcom/tranthor/sdk/TranthorCallback;)V
+	public static synthetic fun identifyWithIdentityToken$default (Lcom/tranthor/sdk/TranthorClient;Ljava/lang/String;Ljava/util/Map;Ljava/lang/String;Lcom/tranthor/sdk/TranthorCallback;ILjava/lang/Object;)V
 	public final fun isOptedOut ()Z
 	public final fun optIn ()V
 	public final fun optIn (Lcom/tranthor/sdk/TranthorCallback;)V

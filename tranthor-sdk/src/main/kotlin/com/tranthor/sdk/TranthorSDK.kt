@@ -163,6 +163,15 @@ public class TranthorSDK private constructor(
      */
     private fun identityInUse(): Boolean = configuration.identityTokenProvider != null || state.identityTokenSupplied
 
+    /** Undoes [supersedeRemovals] after a failed write: the removal is back and still parked, with its retry timer running. */
+    private fun restoreParkedRemovals(removals: List<QueueItem>, parked: DeliveryFailure?) {
+        state.pendingRemovals = ArrayList(removals)
+        if (parked != null && removals.isNotEmpty()) {
+            removalParked = parked
+            startRemovalRetry(timings.providerBackoffMs)
+        }
+    }
+
     /** A registration of this install's token under [user] supersedes a removal of it for the same user that an identity refusal parked. */
     private fun supersedeRemovals(user: String, installation: StoredInstallation): Boolean {
         // Only a removal parked by an identity refusal is superseded: it could otherwise keep the registration behind it
@@ -224,6 +233,7 @@ public class TranthorSDK private constructor(
         val tokensBefore = state.tokens.copy()
         val suppliedBefore = state.identityTokenSupplied
         val removalsBefore = state.pendingRemovals.toList()
+        val parkedBefore = removalParked
         var tokenSet = false
         if (user != null && !identityToken.isNullOrEmpty()) {
             state.tokens.set(user, identityToken)
@@ -249,7 +259,7 @@ public class TranthorSDK private constructor(
             state.anonymousId = previousAnonymousId
             state.tokens = tokensBefore
             state.identityTokenSupplied = suppliedBefore
-            state.pendingRemovals = ArrayList(removalsBefore)
+            restoreParkedRemovals(removalsBefore, parkedBefore)
             // The hold it ended is back: nothing about the batch changed.
             if (endedHold && holdBefore != null) startHold(holdBefore)
             throw error
@@ -531,11 +541,12 @@ public class TranthorSDK private constructor(
             if (fingerprint != sentInstallation) {
                 // Signing the same user in again registers the token, which supersedes a parked removal of it.
                 val removalsBefore = state.pendingRemovals.toList()
+                val parkedBefore = removalParked
                 val superseded = state.userId?.let { supersedeRemovals(it, registration) } == true
                 try {
                     admit(listOf(installationRegistration(state, context, platform, nextInstallationTime(), registration)), saveState = superseded)
                 } catch (error: Throwable) {
-                    state.pendingRemovals = ArrayList(removalsBefore)
+                    restoreParkedRemovals(removalsBefore, parkedBefore)
                     throw error
                 }
                 sentInstallation = fingerprint

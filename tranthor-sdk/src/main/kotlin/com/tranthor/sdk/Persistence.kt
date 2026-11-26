@@ -120,6 +120,8 @@ internal class StoredState(
             val root = runCatching { JsonValue.parse(String(bytes, Charsets.UTF_8)).objectValue }.getOrNull() ?: return result
             root["anonymousId"]?.stringValue?.takeIf(::isUuid)?.let { result.anonymousId = it }
             result.userId = root["userId"]?.stringValue
+            // Identity stays in use: without the flag a refusal would drop a batch the app expects to be held.
+            result.identityTokenSupplied = root["identityTokenSupplied"]?.booleanValue == true
             return result
         }
 
