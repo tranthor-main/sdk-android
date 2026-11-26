@@ -623,8 +623,8 @@ class IdentityTokenTest {
 
     // ---- opt-out removal ----
 
-    private suspend fun optedOutWithInstallation(provider: (suspend (String) -> String?)?, namespace: String, sleeper: ManualSleeper = ManualSleeper()): TranthorSDK {
-        val sdk = sdk(provider = provider, namespace = namespace, sleeper = sleeper)
+    private suspend fun optedOutWithInstallation(provider: (suspend (String) -> String?)?, namespace: String, sleeper: ManualSleeper = ManualSleeper(), retries: Int = 0): TranthorSDK {
+        val sdk = sdk(provider = provider, namespace = namespace, sleeper = sleeper, retries = retries)
         sdk.identify("u1", identityToken = valid("u1", "cached"))
         sdk.registerInstallation("fcm-token-1", "com.example", InstallationPermission.GRANTED)
         sdk.flush()
@@ -683,6 +683,36 @@ class IdentityTokenTest {
         sleeper.release(sleeper.wait(60_000.0))
         waitUntil { requests.size == 3 }
         waitUntil { stored("removal-parked").pendingRemovals.isEmpty() }
+        assertEquals("delivered at last: nothing more is reported", 2, notices.size)
+        assertTrue(errors.snapshot().isEmpty())
+        sdk.shutdown()
+    }
+
+    @Test fun anOptOutRemovalDuringALongOutageIsRetriedOnTheTimerUntilDelivered() = runBlocking {
+        val sleeper = ManualSleeper()
+        // Two retries are configured; the outage lasts past them, and the server asks for 120 s each time.
+        val sdk = optedOutWithInstallation(null, "removal-outage", sleeper, retries = 2)
+        var outage = true
+        respond = { _, _ ->
+            if (outage) MiniHttpServer.Response(503, mapOf("Retry-After" to "120", "Content-Type" to "application/json"),
+                """{"code":"identity_settings_unavailable"}""".toByteArray()) else MiniHttpServer.Response(204)
+        }
+        sdk.optOut()
+        waitUntil { notices.size == 1 }
+        // Parked at once for the server's delay, not retried in a loop: one request, a notice, no error report.
+        assertEquals(NoticeKind.IDENTITY_UNAVAILABLE, notices.single().kind)
+        assertFalse("the push token stays out of the notice", notices.single().message.contains("fcm-token-1"))
+        assertEquals(1, requests.size)
+        assertEquals("kept, not dropped", 1, stored("removal-outage").pendingRemovals.size)
+        // Retried on the timer with no app restart; the outage goes on, so every failed attempt is a notice.
+        sleeper.release(sleeper.wait(120_000.0))
+        waitUntil { notices.size == 2 }
+        assertEquals(2, requests.size)
+        outage = false
+        sleeper.release(sleeper.wait(120_000.0))
+        waitUntil { requests.size == 3 }
+        waitUntil { stored("removal-outage").pendingRemovals.isEmpty() }
+        assertTrue(body(2)["batch"]!!.arrayValue!!.any { it["event"]?.stringValue == "Installation Removed" })
         assertEquals("delivered at last: nothing more is reported", 2, notices.size)
         assertTrue(errors.snapshot().isEmpty())
         sdk.shutdown()
