@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-27
+
 ### Added
 
 - Identity verification. `identify(userId, identityToken = …)` and `Configuration.identityTokenProvider` (Java: `Builder.identityTokenSupplier`) send a customer-signed identity token with each batch, for its own user, renewed through the provider before it expires. Tokens are saved in the state file. Details are in the README.

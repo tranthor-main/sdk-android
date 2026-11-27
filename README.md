@@ -17,8 +17,8 @@ Depend on these coordinates:
 
 ```kotlin
 dependencies {
-    implementation("com.tranthor:tranthor-sdk:0.2.1")
-    implementation("com.tranthor:tranthor-push:0.2.1") // optional
+    implementation("com.tranthor:tranthor-sdk:0.3.0")
+    implementation("com.tranthor:tranthor-push:0.3.0") // optional
 }
 ```
 

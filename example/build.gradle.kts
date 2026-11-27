@@ -24,7 +24,7 @@ android {
         minSdk = 24
         targetSdk = 36
         versionCode = 1
-        versionName = "0.2.1"
+        versionName = "0.3.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "FIREBASE_APPLICATION_ID", localString("tranthor.firebase.applicationId"))
         buildConfigField("String", "FIREBASE_API_KEY", localString("tranthor.firebase.apiKey"))
