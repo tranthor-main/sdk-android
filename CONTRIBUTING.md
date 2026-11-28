@@ -32,7 +32,9 @@ Both library modules use Kotlin explicit API mode and track their public surface
 
 ## Releasing
 
-The version lives in `gradle.properties` (`VERSION_NAME`) and is also reported in each event's library context. `./gradlew publishToMavenLocal` publishes both modules to your local Maven repository for testing. Publishing to Maven Central additionally needs artifact signing, a javadoc jar and repository credentials, none of which are set up yet.
+The version lives in `gradle.properties` (`VERSION_NAME`) and is also reported in each event's library context. `./gradlew publishToMavenLocal` publishes both modules, unsigned, to your local Maven repository for testing.
+
+To publish a release to Maven Central, a maintainer tags the release commit with the version and starts the "Publish to Maven Central" workflow with that tag. It uploads both modules, signed, with their sources and javadoc jars; the upload is then released from the Central Portal. The workflow reads the Central Portal token and the signing key from repository secrets.
 
 ## Pull requests
 
