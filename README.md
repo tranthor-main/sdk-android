@@ -11,18 +11,16 @@ Android 6.0 (API 23) or later. The libraries use Kotlin coroutines and AndroidX 
 
 ## Install
 
-The artifacts are not on Maven Central yet. Until they are, use the modules from source.
-
-Depend on these coordinates:
+The libraries are on Maven Central. Make sure `mavenCentral()` is in your repositories, then add:
 
 ```kotlin
 dependencies {
-    implementation("com.tranthor:tranthor-sdk:0.3.0")
-    implementation("com.tranthor:tranthor-push:0.3.0") // optional
+    implementation("com.tranthor:tranthor-sdk:0.3.1")
+    implementation("com.tranthor:tranthor-push:0.3.1") // optional
 }
 ```
 
-To build from a checkout, add it to your `settings.gradle.kts` as a composite build. Gradle then substitutes the dependencies above with the checkout's modules. Use the path to wherever you cloned this repository; the directory name is up to you:
+To build from a checkout instead, add it to your `settings.gradle.kts` as a composite build. Gradle then substitutes the dependencies above with the checkout's modules. Use the path to wherever you cloned this repository; the directory name is up to you:
 
 ```kotlin
 includeBuild("path/to/your/checkout")
