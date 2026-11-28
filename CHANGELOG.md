@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-28
+
+### Changed
+
+- The libraries are published to Maven Central as `com.tranthor:tranthor-sdk` and `com.tranthor:tranthor-push`. Nothing in the SDK itself changed.
+
 ## [0.3.0] - 2026-11-27
 
 ### Added
