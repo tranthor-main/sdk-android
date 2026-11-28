@@ -1,11 +1,10 @@
 plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.kotlin.android)
-    `maven-publish`
+    alias(libs.plugins.maven.publish)
 }
 
 description = "Tranthor events SDK for Android: identify, track and page calls with durable, offline-tolerant delivery."
-apply(from = rootProject.file("gradle/publish.gradle.kts"))
 
 android {
     namespace = "com.tranthor.sdk"
@@ -57,9 +56,6 @@ android {
         }
     }
 
-    publishing {
-        singleVariant("release") { withSourcesJar() }
-    }
 
     lint {
         abortOnError = true

@@ -1,11 +1,10 @@
 plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.kotlin.android)
-    `maven-publish`
+    alias(libs.plugins.maven.publish)
 }
 
 description = "Tranthor push notifications for Android: FCM token registration, notification display and open and dismiss reporting."
-apply(from = rootProject.file("gradle/publish.gradle.kts"))
 
 android {
     namespace = "com.tranthor.push"
@@ -33,9 +32,6 @@ android {
         }
     }
 
-    publishing {
-        singleVariant("release") { withSourcesJar() }
-    }
 
     lint {
         abortOnError = true
